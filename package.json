@@ -1,0 +1,68 @@
+{
+  "name": "multiverse",
+  "version": "0.1.0",
+  "description": "An opinionated TypeScript framework for building multi-tenant SaaS applications  tenant isolation, scoped auth, transactional outbox, and rate limiting out of the box.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ tests/",
+    "clean": "rm -rf dist coverage"
+  },
+  "keywords": [
+    "multi-tenant",
+    "saas",
+    "framework",
+    "typescript",
+    "postgres",
+    "oidc",
+    "event-sourcing",
+    "outbox-pattern",
+    "rate-limiting",
+    "schema-isolation",
+    "tenant",
+    "async-local-storage"
+  ],
+  "author": "elliot736 <omar@elliot736.de> (https://elliot736.de)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/elliot736/multiverse.git"
+  },
+  "homepage": "https://github.com/elliot736/multiverse#readme",
+  "bugs": {
+    "url": "https://github.com/elliot736/multiverse/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "jose": "^5.2.0",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/pg": "^8.10.9",
+    "@vitest/coverage-v8": "^1.6.1",
+    "eslint": "^9.39.4",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.57.1",
+    "vitest": "^1.2.0"
+  }
+}
