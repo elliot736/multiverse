@@ -128,3 +128,132 @@ describe('TenantContext', () => {
             expect(id).toBe('promise-chain');
             return Promise.resolve().then(() => TenantContext.current().id);
           });
+      });
+
+      expect(result).toBe('promise-chain');
+    });
+
+    it('propagates context through setTimeout', async () => {
+      const tenant = makeTenant({ id: 'timeout-test' });
+
+      const result = await TenantContext.run(tenant, () => {
+        return new Promise<string>((resolve) => {
+          setTimeout(() => {
+            resolve(TenantContext.current().id);
+          }, 5);
+        });
+      });
+
+      expect(result).toBe('timeout-test');
+    });
+
+    it('propagates context through setImmediate', async () => {
+      const tenant = makeTenant({ id: 'immediate-test' });
+
+      const result = await TenantContext.run(tenant, () => {
+        return new Promise<string>((resolve) => {
+          setImmediate(() => {
+            resolve(TenantContext.current().id);
+          });
+        });
+      });
+
+      expect(result).toBe('immediate-test');
+    });
+
+    it('propagates error from within context', () => {
+      const tenant = makeTenant({ id: 'error-test' });
+
+      expect(() =>
+        TenantContext.run(tenant, () => {
+          throw new Error('inner error');
+        }),
+      ).toThrow('inner error');
+    });
+
+    it('propagates async errors from within context', async () => {
+      const tenant = makeTenant({ id: 'async-error-test' });
+
+      await expect(
+        TenantContext.run(tenant, async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          throw new Error('async inner error');
+        }),
+      ).rejects.toThrow('async inner error');
+    });
+
+    it('returns the value from the callback', () => {
+      const tenant = makeTenant();
+      const result = TenantContext.run(tenant, () => 42);
+      expect(result).toBe(42);
+    });
+  });
+
+  describe('current - outside context', () => {
+    it('throws NoTenantContextError when no context is active', () => {
+      expect(() => TenantContext.current()).toThrow(NoTenantContextError);
+    });
+
+    it('throws with a descriptive message', () => {
+      expect(() => TenantContext.current()).toThrow(
+        'No tenant context available',
+      );
+    });
+
+    it('error has correct code', () => {
+      try {
+        TenantContext.current();
+      } catch (err) {
+        expect(err).toBeInstanceOf(NoTenantContextError);
+        expect((err as NoTenantContextError).code).toBe('NO_TENANT_CONTEXT');
+      }
+    });
+  });
+
+  describe('currentOrNull', () => {
+    it('returns null when no context is active', () => {
+      expect(TenantContext.currentOrNull()).toBeNull();
+    });
+
+    it('returns the tenant when context is active', () => {
+      const tenant = makeTenant({ id: 'nullable-test' });
+      TenantContext.run(tenant, () => {
+        expect(TenantContext.currentOrNull()?.id).toBe('nullable-test');
+      });
+    });
+
+    it('returns null again after context exits', () => {
+      const tenant = makeTenant();
+      TenantContext.run(tenant, () => {
+        expect(TenantContext.currentOrNull()).not.toBeNull();
+      });
+      expect(TenantContext.currentOrNull()).toBeNull();
+    });
+  });
+
+  describe('schemaName', () => {
+    it('returns tenant_{id} for the current tenant', () => {
+      const tenant = makeTenant({ id: 'xyz123' });
+      TenantContext.run(tenant, () => {
+        expect(TenantContext.schemaName()).toBe('tenant_xyz123');
+      });
+    });
+
+    it('throws when no context is active', () => {
+      expect(() => TenantContext.schemaName()).toThrow(NoTenantContextError);
+    });
+
+    it('uses the correct tenant id in nested contexts', () => {
+      const outer = makeTenant({ id: 'outer' });
+      const inner = makeTenant({ id: 'inner' });
+
+      TenantContext.run(outer, () => {
+        expect(TenantContext.schemaName()).toBe('tenant_outer');
+        TenantContext.run(inner, () => {
+          expect(TenantContext.schemaName()).toBe('tenant_inner');
+        });
+        expect(TenantContext.schemaName()).toBe('tenant_outer');
+      });
+    });
+  });
+});
