@@ -78,3 +78,86 @@ export class PathTenantResolver implements TenantResolver {
   private readonly prefix: string;
 
   /**
+   * @param prefix - Path prefix before the tenant segment. Default: '/'
+   *   Example: '/t/' means URLs look like /t/{tenantId}/...
+   */
+  constructor(prefix: string = "/") {
+    this.prefix = prefix.endsWith("/") ? prefix : prefix + "/";
+  }
+
+  async resolve(req: IncomingMessage): Promise<string | null> {
+    const url = req.url;
+    if (!url) return null;
+
+    // Parse just the pathname
+    const pathname = url.split("?")[0] ?? "";
+    if (!pathname.startsWith(this.prefix)) return null;
+
+    const rest = pathname.slice(this.prefix.length);
+    const segment = rest.split("/")[0];
+    return segment?.trim() || null;
+  }
+}
+
+/**
+ * Resolves tenant from a JWT claim without verifying the token.
+ * This is used for tenant resolution only  full JWT validation happens
+ * in the auth middleware. The token is decoded (not verified) to extract
+ * the tenant claim.
+ */
+export class JwtTenantResolver implements TenantResolver {
+  private readonly claimName: string;
+
+  constructor(claimName: string = "tenant_id") {
+    this.claimName = claimName;
+  }
+
+  async resolve(req: IncomingMessage): Promise<string | null> {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) return null;
+
+    const token = authHeader.slice(7);
+    try {
+      // Decode without verification  just extract the claim
+      const parts = token.split(".");
+      if (parts.length !== 3) return null;
+
+      const payload = JSON.parse(
+        Buffer.from(parts[1]!, "base64url").toString("utf-8"),
+      ) as Record<string, unknown>;
+
+      const value = payload[this.claimName];
+      if (typeof value !== "string") return null;
+
+      return value;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Tries multiple resolvers in order, returning the first non-null result.
+ * Useful for supporting multiple resolution strategies simultaneously
+ * (e.g., try header first, fall back to subdomain).
+ */
+export class ChainTenantResolver implements TenantResolver {
+  private readonly resolvers: TenantResolver[];
+
+  constructor(resolvers: TenantResolver[]) {
+    if (resolvers.length === 0) {
+      throw new TenantResolutionError(
+        "ChainTenantResolver requires at least one resolver",
+      );
+    }
+    this.resolvers = resolvers;
+  }
+
+  async resolve(req: IncomingMessage): Promise<string | null> {
+    for (const resolver of this.resolvers) {
+      const tenantId = await resolver.resolve(req);
+      if (tenantId) return tenantId;
+    }
+    return null;
+  }
+}
