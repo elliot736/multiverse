@@ -118,3 +118,127 @@ export class MemoryTenantRegistry implements TenantRegistry {
  *   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  *   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
  * );
+ * ```
+ */
+export class PostgresTenantRegistry implements TenantRegistry {
+  constructor(
+    private readonly query: <T>(sql: string, params?: unknown[]) => Promise<T[]>,
+  ) {}
+
+  async get(id: string): Promise<Tenant | null> {
+    const rows = await this.query<TenantRow>(
+      'SELECT * FROM public.tenants WHERE id = $1',
+      [id],
+    );
+    return rows[0] ? this.toTenant(rows[0]) : null;
+  }
+
+  async getBySlug(slug: string): Promise<Tenant | null> {
+    const rows = await this.query<TenantRow>(
+      'SELECT * FROM public.tenants WHERE slug = $1',
+      [slug],
+    );
+    return rows[0] ? this.toTenant(rows[0]) : null;
+  }
+
+  async list(): Promise<Tenant[]> {
+    const rows = await this.query<TenantRow>(
+      'SELECT * FROM public.tenants ORDER BY created_at ASC',
+    );
+    return rows.map((row) => this.toTenant(row));
+  }
+
+  async create(input: CreateTenantInput): Promise<Tenant> {
+    const rows = await this.query<TenantRow>(
+      `INSERT INTO public.tenants (id, name, slug, tier, status, config)
+       VALUES ($1, $2, $3, $4, 'provisioning', $5)
+       RETURNING *`,
+      [input.id, input.name, input.slug, input.tier ?? 'free', JSON.stringify(input.config ?? {})],
+    );
+    return this.toTenant(rows[0]!);
+  }
+
+  async update(
+    id: string,
+    updates: Partial<Pick<Tenant, 'name' | 'slug' | 'tier' | 'status' | 'config'>>,
+  ): Promise<Tenant> {
+    const setClauses: string[] = [];
+    const params: unknown[] = [];
+    let paramIndex = 1;
+
+    if (updates.name !== undefined) {
+      setClauses.push(`name = $${paramIndex++}`);
+      params.push(updates.name);
+    }
+    if (updates.slug !== undefined) {
+      setClauses.push(`slug = $${paramIndex++}`);
+      params.push(updates.slug);
+    }
+    if (updates.tier !== undefined) {
+      setClauses.push(`tier = $${paramIndex++}`);
+      params.push(updates.tier);
+    }
+    if (updates.status !== undefined) {
+      setClauses.push(`status = $${paramIndex++}`);
+      params.push(updates.status);
+    }
+    if (updates.config !== undefined) {
+      setClauses.push(`config = $${paramIndex++}`);
+      params.push(JSON.stringify(updates.config));
+    }
+
+    if (setClauses.length === 0) {
+      const existing = await this.get(id);
+      if (!existing) throw new TenantNotFoundError(id);
+      return existing;
+    }
+
+    setClauses.push(`updated_at = now()`);
+    params.push(id);
+
+    const rows = await this.query<TenantRow>(
+      `UPDATE public.tenants SET ${setClauses.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+      params,
+    );
+
+    if (rows.length === 0) {
+      throw new TenantNotFoundError(id);
+    }
+
+    return this.toTenant(rows[0]!);
+  }
+
+  async delete(id: string): Promise<void> {
+    const rows = await this.query<{ id: string }>(
+      'DELETE FROM public.tenants WHERE id = $1 RETURNING id',
+      [id],
+    );
+    if (rows.length === 0) {
+      throw new TenantNotFoundError(id);
+    }
+  }
+
+  private toTenant(row: TenantRow): Tenant {
+    return {
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      tier: row.tier as Tenant['tier'],
+      status: row.status as Tenant['status'],
+      config: (typeof row.config === 'string' ? JSON.parse(row.config) : row.config) as TenantConfig,
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at),
+    };
+  }
+}
+
+interface TenantRow {
+  id: string;
+  name: string;
+  slug: string;
+  tier: string;
+  status: string;
+  config: string | Record<string, unknown>;
+  created_at: string | Date;
+  updated_at: string | Date;
+}
