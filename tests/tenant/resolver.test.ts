@@ -173,3 +173,177 @@ describe('PathTenantResolver', () => {
     const resolver = new PathTenantResolver();
     const req = mockRequest({ url: '/' });
     expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('ignores query parameters', async () => {
+    const resolver = new PathTenantResolver();
+    const req = mockRequest({ url: '/acme?foo=bar' });
+    expect(await resolver.resolve(req)).toBe('acme');
+  });
+
+  it('returns null when url is missing', async () => {
+    const resolver = new PathTenantResolver();
+    const req = mockRequest({});
+    (req as { url?: string }).url = undefined;
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('returns null for whitespace-only segment', async () => {
+    const resolver = new PathTenantResolver();
+    const req = mockRequest({ url: '/   ' });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('handles url with only the prefix and no tenant', async () => {
+    const resolver = new PathTenantResolver('/t/');
+    const req = mockRequest({ url: '/t/' });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+});
+
+describe('JwtTenantResolver', () => {
+  it('extracts tenant from JWT claim', async () => {
+    const resolver = new JwtTenantResolver();
+    const token = makeJwt({ sub: 'user1', tenant_id: 'acme' });
+    const req = mockRequest({ headers: { authorization: `Bearer ${token}` } });
+    expect(await resolver.resolve(req)).toBe('acme');
+  });
+
+  it('extracts tenant from custom claim name', async () => {
+    const resolver = new JwtTenantResolver('org_id');
+    const token = makeJwt({ sub: 'user1', org_id: 'globex' });
+    const req = mockRequest({ headers: { authorization: `Bearer ${token}` } });
+    expect(await resolver.resolve(req)).toBe('globex');
+  });
+
+  it('returns null when no authorization header', async () => {
+    const resolver = new JwtTenantResolver();
+    const req = mockRequest({ headers: {} });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('returns null when authorization is not Bearer', async () => {
+    const resolver = new JwtTenantResolver();
+    const req = mockRequest({ headers: { authorization: 'Basic abc123' } });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('returns null when JWT is malformed', async () => {
+    const resolver = new JwtTenantResolver();
+    const req = mockRequest({ headers: { authorization: 'Bearer not.a.jwt!!!' } });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('returns null when JWT has wrong number of parts', async () => {
+    const resolver = new JwtTenantResolver();
+    const req = mockRequest({ headers: { authorization: 'Bearer only.two' } });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('returns null when claim is missing', async () => {
+    const resolver = new JwtTenantResolver();
+    const token = makeJwt({ sub: 'user1' });
+    const req = mockRequest({ headers: { authorization: `Bearer ${token}` } });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('returns null when claim is not a string', async () => {
+    const resolver = new JwtTenantResolver();
+    const token = makeJwt({ sub: 'user1', tenant_id: 42 });
+    const req = mockRequest({ headers: { authorization: `Bearer ${token}` } });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('returns null when claim is boolean', async () => {
+    const resolver = new JwtTenantResolver();
+    const token = makeJwt({ sub: 'user1', tenant_id: true });
+    const req = mockRequest({ headers: { authorization: `Bearer ${token}` } });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('returns null when claim is null', async () => {
+    const resolver = new JwtTenantResolver();
+    const token = makeJwt({ sub: 'user1', tenant_id: null });
+    const req = mockRequest({ headers: { authorization: `Bearer ${token}` } });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+
+  it('handles JWT with empty bearer prefix', async () => {
+    const resolver = new JwtTenantResolver();
+    const req = mockRequest({ headers: { authorization: 'Bearer ' } });
+    expect(await resolver.resolve(req)).toBeNull();
+  });
+});
+
+describe('ChainTenantResolver', () => {
+  it('returns result from first resolver that matches', async () => {
+    const chain = new ChainTenantResolver([
+      new HeaderTenantResolver(),
+      new PathTenantResolver(),
+    ]);
+    const req = mockRequest({
+      headers: { 'x-tenant-id': 'from-header' },
+      url: '/from-path/api',
+    });
+    expect(await chain.resolve(req)).toBe('from-header');
+  });
+
+  it('falls back to second resolver when first returns null', async () => {
+    const chain = new ChainTenantResolver([
+      new HeaderTenantResolver(),
+      new PathTenantResolver(),
+    ]);
+    const req = mockRequest({ url: '/from-path/api' });
+    expect(await chain.resolve(req)).toBe('from-path');
+  });
+
+  it('falls back through three resolvers', async () => {
+    const chain = new ChainTenantResolver([
+      new HeaderTenantResolver(),
+      new SubdomainTenantResolver('app.example.com'),
+      new PathTenantResolver(),
+    ]);
+    const req = mockRequest({ url: '/fallback-path/api' });
+    expect(await chain.resolve(req)).toBe('fallback-path');
+  });
+
+  it('returns null when no resolver matches', async () => {
+    const chain = new ChainTenantResolver([
+      new HeaderTenantResolver(),
+      new SubdomainTenantResolver('app.example.com'),
+    ]);
+    const req = mockRequest({ url: '/test' });
+    expect(await chain.resolve(req)).toBeNull();
+  });
+
+  it('throws when constructed with empty array', () => {
+    expect(() => new ChainTenantResolver([])).toThrow(TenantResolutionError);
+    expect(() => new ChainTenantResolver([])).toThrow(
+      'ChainTenantResolver requires at least one resolver',
+    );
+  });
+
+  it('works with a single resolver', async () => {
+    const chain = new ChainTenantResolver([new HeaderTenantResolver()]);
+    const req = mockRequest({ headers: { 'x-tenant-id': 'solo' } });
+    expect(await chain.resolve(req)).toBe('solo');
+  });
+
+  it('stops at first match and does not call later resolvers', async () => {
+    let secondCalled = false;
+    const customResolver = {
+      async resolve() {
+        secondCalled = true;
+        return 'should-not-reach';
+      },
+    };
+
+    const chain = new ChainTenantResolver([
+      new HeaderTenantResolver(),
+      customResolver,
+    ]);
+    const req = mockRequest({ headers: { 'x-tenant-id': 'first' } });
+    await chain.resolve(req);
+    expect(secondCalled).toBe(false);
+  });
+});
