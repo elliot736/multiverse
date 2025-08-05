@@ -53,3 +53,54 @@ export class TenantPool {
   }
 
   /**
+   * Execute a function within a transaction scoped to a tenant's schema.
+   * The transaction is automatically committed on success or rolled back on error.
+   * The client is released after the transaction completes.
+   */
+  async transaction<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.getConnection(tenantId);
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Execute a raw query on the public schema (no tenant scoping).
+   * Used for admin operations like listing tenants.
+   */
+  async queryPublic<T>(sql: string, params?: unknown[]): Promise<T[]> {
+    const pool = this.getPool();
+    const result = await pool.query(sql, params);
+    return result.rows as T[];
+  }
+
+  /**
+   * Shut down the pool.
+   */
+  async close(): Promise<void> {
+    if (this.pool) {
+      await this.pool.end();
+      this.pool = null;
+    }
+  }
+}
+
+/**
+ * Quote a SQL identifier to prevent injection.
+ * Postgres identifiers are quoted with double quotes.
+ */
+function quoteIdentifier(identifier: string): string {
+  // Only allow alphanumeric and underscores in schema names
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(identifier)) {
+    throw new Error(`Invalid identifier: ${identifier}`);
+  }
+  return `"${identifier}"`;
+}
