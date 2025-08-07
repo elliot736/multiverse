@@ -98,3 +98,100 @@ export class TenantMigrator {
         if (executed.has(migration.name)) continue;
 
         try {
+          await client.query('BEGIN');
+          await client.query(migration.sql);
+          await client.query(
+            'INSERT INTO _migrations (name) VALUES ($1)',
+            [migration.name],
+          );
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw new MigrationError(
+            tenantId,
+            migration.name,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Run pending migrations for ALL tenant schemas.
+   * Discovers tenant schemas by querying information_schema.
+   */
+  async migrateAll(): Promise<MigrateAllResult> {
+    const schemas = await this.pool.queryPublic<{ schema_name: string }>(
+      `SELECT schema_name FROM information_schema.schemata
+       WHERE schema_name LIKE 'tenant_%'
+       ORDER BY schema_name`,
+    );
+
+    const result: MigrateAllResult = {
+      succeeded: [],
+      failed: [],
+    };
+
+    for (const schema of schemas) {
+      const tenantId = schema.schema_name.replace(/^tenant_/, '');
+      try {
+        await this.migrate(tenantId);
+        result.succeeded.push(tenantId);
+      } catch (err) {
+        result.failed.push({
+          tenantId,
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Drop a tenant's schema entirely. Use with extreme caution.
+   */
+  async deprovision(tenantId: string): Promise<void> {
+    const schemaName = `tenant_${tenantId}`;
+    await this.pool.queryPublic(
+      `DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`,
+    );
+  }
+
+  /**
+   * Load migration files from the migrations directory, sorted by name.
+   */
+  private async loadMigrations(): Promise<Migration[]> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.migrationsDir);
+    } catch {
+      return [];
+    }
+
+    const sqlFiles = entries
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+
+    const migrations: Migration[] = [];
+    for (const file of sqlFiles) {
+      const sql = await readFile(join(this.migrationsDir, file), 'utf-8');
+      migrations.push({ name: file, sql });
+    }
+
+    return migrations;
+  }
+}
+
+interface Migration {
+  name: string;
+  sql: string;
+}
+
+export interface MigrateAllResult {
+  succeeded: string[];
+  failed: Array<{ tenantId: string; error: Error }>;
+}
