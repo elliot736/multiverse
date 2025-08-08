@@ -148,3 +148,152 @@ describe('TenantQuery', () => {
       ).rejects.toThrow(CrossTenantAccessError);
     });
 
+    it('cross-tenant error has correct properties', async () => {
+      const pool = createMockPool(createMockClient());
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      try {
+        await TenantContext.run(tenant, () => tq.queryAs('globex', 'SELECT 1'));
+      } catch (err) {
+        expect(err).toBeInstanceOf(CrossTenantAccessError);
+        expect((err as CrossTenantAccessError).requestedTenantId).toBe('globex');
+        expect((err as CrossTenantAccessError).currentTenantId).toBe('acme');
+        expect((err as CrossTenantAccessError).code).toBe('CROSS_TENANT_ACCESS');
+      }
+    });
+
+    it('allows cross-tenant access with explicit opt-in', async () => {
+      const mockClient = createMockClient([{ id: 'x' }]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      const result = await TenantContext.run(tenant, () =>
+        tq.queryAs('globex', 'SELECT 1', [], { allowCrossTenant: true }),
+      );
+      expect(result).toEqual([{ id: 'x' }]);
+    });
+
+    it('allows queryAs when no tenant context is active', async () => {
+      const mockClient = createMockClient([]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      await tq.queryAs('acme', 'SELECT 1');
+      expect(pool.getConnection).toHaveBeenCalledWith('acme');
+    });
+
+    it('allows queryAs for same tenant as context', async () => {
+      const mockClient = createMockClient([{ id: 1 }]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      const result = await TenantContext.run(tenant, () =>
+        tq.queryAs('acme', 'SELECT 1'),
+      );
+      expect(result).toEqual([{ id: 1 }]);
+    });
+  });
+
+  describe('transaction', () => {
+    it('executes within a transaction scoped to current tenant', async () => {
+      const mockClient = createMockClient([]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      await TenantContext.run(tenant, () =>
+        tq.transaction(async (tx) => {
+          await tx.query('INSERT INTO orders (id) VALUES ($1)', ['ord-1']);
+          await tx.query('INSERT INTO order_items (order_id) VALUES ($1)', ['ord-1']);
+        }),
+      );
+
+      expect(pool.transaction).toHaveBeenCalledWith('acme', expect.any(Function));
+    });
+
+    it('provides access to the underlying client', async () => {
+      const mockClient = createMockClient([]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      await TenantContext.run(tenant, () =>
+        tq.transaction(async (tx) => {
+          expect(tx.client).toBeDefined();
+        }),
+      );
+    });
+
+    it('throws when no tenant context is active', async () => {
+      const pool = createMockPool(createMockClient());
+      const tq = new TenantQuery(pool);
+
+      await expect(
+        tq.transaction(async () => {}),
+      ).rejects.toThrow(NoTenantContextError);
+    });
+
+    it('returns value from transaction', async () => {
+      const mockClient = createMockClient([]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      const result = await TenantContext.run(tenant, () =>
+        tq.transaction(async (_tx) => {
+          return { success: true };
+        }),
+      );
+      expect(result).toEqual({ success: true });
+    });
+  });
+
+  describe('transactionAs', () => {
+    it('prevents cross-tenant transactions', async () => {
+      const pool = createMockPool(createMockClient());
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      await expect(
+        TenantContext.run(tenant, () =>
+          tq.transactionAs('globex', async () => {}),
+        ),
+      ).rejects.toThrow(CrossTenantAccessError);
+    });
+
+    it('allows cross-tenant transactions with opt-in', async () => {
+      const mockClient = createMockClient([]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      await TenantContext.run(tenant, () =>
+        tq.transactionAs('globex', async () => {}, { allowCrossTenant: true }),
+      );
+    });
+
+    it('allows transactionAs for same tenant as context', async () => {
+      const mockClient = createMockClient([]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      const tenant = makeTenant('acme');
+      await TenantContext.run(tenant, () =>
+        tq.transactionAs('acme', async () => {}),
+      );
+      expect(pool.transaction).toHaveBeenCalledWith('acme', expect.any(Function));
+    });
+
+    it('works without tenant context', async () => {
+      const mockClient = createMockClient([]);
+      const pool = createMockPool(mockClient);
+      const tq = new TenantQuery(pool);
+
+      await tq.transactionAs('acme', async () => {});
+      expect(pool.transaction).toHaveBeenCalledWith('acme', expect.any(Function));
+    });
+  });
+});
