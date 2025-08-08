@@ -183,3 +183,186 @@ describe('TenantMigrator', () => {
       } catch (err) {
         expect(err).toBeInstanceOf(MigrationError);
         expect((err as MigrationError).tenantId).toBe('acme');
+        expect((err as MigrationError).migration).toBe('001_bad.sql');
+        expect((err as MigrationError).code).toBe('MIGRATION_ERROR');
+      }
+    });
+
+    it('sorts migrations alphabetically', async () => {
+      await fs.writeFile(path.join(migrationsDir, '003_third.sql'), 'SELECT 3');
+      await fs.writeFile(path.join(migrationsDir, '001_first.sql'), 'SELECT 1');
+      await fs.writeFile(path.join(migrationsDir, '002_second.sql'), 'SELECT 2');
+
+      const client = createMockClient([]);
+      const pool = createMockPool(client);
+      const migrator = new TenantMigrator(pool, migrationsDir);
+
+      await migrator.migrate('acme');
+
+      const insertQueries = client._executedQueries.filter(
+        (q) => q.sql.includes('INSERT INTO _migrations'),
+      );
+      expect(insertQueries.map((q) => q.params![0])).toEqual([
+        '001_first.sql',
+        '002_second.sql',
+        '003_third.sql',
+      ]);
+    });
+
+    it('releases client after successful migration', async () => {
+      await fs.writeFile(path.join(migrationsDir, '001_init.sql'), 'SELECT 1');
+
+      const client = createMockClient([]);
+      const pool = createMockPool(client);
+      const migrator = new TenantMigrator(pool, migrationsDir);
+
+      await migrator.migrate('acme');
+      expect(client.release).toHaveBeenCalled();
+    });
+
+    it('releases client after failed migration', async () => {
+      await fs.writeFile(path.join(migrationsDir, '001_bad.sql'), 'FAIL');
+
+      const client = createMockClient([]);
+      client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        client._executedQueries.push({ sql, params });
+        if (sql === 'FAIL') throw new Error('fail');
+        if (sql.includes('SELECT name FROM _migrations')) {
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [], rowCount: 0 };
+      });
+
+      const pool = createMockPool(client);
+      const migrator = new TenantMigrator(pool, migrationsDir);
+
+      try { await migrator.migrate('acme'); } catch { /* expected */ }
+      expect(client.release).toHaveBeenCalled();
+    });
+  });
+
+  describe('provision', () => {
+    it('creates schema and outbox table', async () => {
+      const client = createMockClient([]);
+      const pool = createMockPool(client);
+      (pool.queryPublic as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      const migrator = new TenantMigrator(pool, migrationsDir);
+      await migrator.provision('newco');
+
+      expect(pool.queryPublic).toHaveBeenCalledWith(
+        'CREATE SCHEMA IF NOT EXISTS "tenant_newco"',
+      );
+
+      const queries = client._executedQueries.map((q) => q.sql);
+      expect(queries.some((q) => q.includes('_outbox'))).toBe(true);
+      expect(queries.some((q) => q.includes('_migrations'))).toBe(true);
+    });
+
+    it('creates outbox index', async () => {
+      const client = createMockClient([]);
+      const pool = createMockPool(client);
+      (pool.queryPublic as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      const migrator = new TenantMigrator(pool, migrationsDir);
+      await migrator.provision('newco');
+
+      const queries = client._executedQueries.map((q) => q.sql);
+      expect(queries.some((q) => q.includes('idx_outbox_undelivered'))).toBe(true);
+    });
+
+    it('runs migrations after creating schema', async () => {
+      await fs.writeFile(path.join(migrationsDir, '001_init.sql'), 'SELECT 1');
+
+      const client = createMockClient([]);
+      const pool = createMockPool(client);
+      (pool.queryPublic as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      const migrator = new TenantMigrator(pool, migrationsDir);
+      await migrator.provision('newco');
+
+      const insertQueries = client._executedQueries.filter(
+        (q) => q.sql.includes('INSERT INTO _migrations'),
+      );
+      expect(insertQueries).toHaveLength(1);
+    });
+  });
+
+  describe('deprovision', () => {
+    it('drops the tenant schema', async () => {
+      const client = createMockClient([]);
+      const pool = createMockPool(client);
+      (pool.queryPublic as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      const migrator = new TenantMigrator(pool, migrationsDir);
+      await migrator.deprovision('oldco');
+
+      expect(pool.queryPublic).toHaveBeenCalledWith(
+        'DROP SCHEMA IF EXISTS "tenant_oldco" CASCADE',
+      );
+    });
+  });
+
+  describe('migrateAll', () => {
+    it('discovers and migrates all tenant schemas', async () => {
+      await fs.writeFile(path.join(migrationsDir, '001_init.sql'), 'SELECT 1');
+
+      const client = createMockClient([]);
+      const pool = createMockPool(client);
+
+      (pool.queryPublic as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { schema_name: 'tenant_acme' },
+        { schema_name: 'tenant_globex' },
+      ]);
+
+      const migrator = new TenantMigrator(pool, migrationsDir);
+      const result = await migrator.migrateAll();
+
+      expect(result.succeeded).toEqual(['acme', 'globex']);
+      expect(result.failed).toHaveLength(0);
+    });
+
+    it('reports failures per tenant without stopping', async () => {
+      await fs.writeFile(path.join(migrationsDir, '001_init.sql'), 'CREATE TABLE t (id TEXT)');
+
+      let callCount = 0;
+      const client = createMockClient([]);
+      client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        client._executedQueries.push({ sql, params });
+        if (sql.includes('SELECT name FROM _migrations')) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (sql === 'CREATE TABLE t (id TEXT)') {
+          callCount++;
+          if (callCount === 1) throw new Error('disk full');
+        }
+        return { rows: [], rowCount: 0 };
+      });
+
+      const pool = createMockPool(client);
+      (pool.queryPublic as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { schema_name: 'tenant_failing' },
+        { schema_name: 'tenant_ok' },
+      ]);
+
+      const migrator = new TenantMigrator(pool, migrationsDir);
+      const result = await migrator.migrateAll();
+
+      expect(result.failed).toHaveLength(1);
+      expect(result.failed[0]!.tenantId).toBe('failing');
+      expect(result.succeeded).toContain('ok');
+    });
+
+    it('handles empty schema list', async () => {
+      const client = createMockClient([]);
+      const pool = createMockPool(client);
+      (pool.queryPublic as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+
+      const migrator = new TenantMigrator(pool, migrationsDir);
+      const result = await migrator.migrateAll();
+
+      expect(result.succeeded).toEqual([]);
+      expect(result.failed).toEqual([]);
+    });
+  });
+});
