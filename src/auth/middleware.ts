@@ -88,3 +88,94 @@ export function authMiddleware(
         tenantId: jwtTenantId,
         email: typeof payload.email === 'string' ? payload.email : undefined,
         name: typeof payload.name === 'string' ? payload.name : undefined,
+        roles,
+        claims: payload,
+      };
+
+      (req as AuthenticatedRequest).user = user;
+      return next();
+    } catch (err) {
+      if (err instanceof AuthenticationError) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+        return;
+      }
+      if (err instanceof CrossTenantAccessError) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+        return;
+      }
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal authentication error' }));
+    }
+  };
+}
+
+/**
+ * Resolve the OIDC configuration for this request.
+ * If perTenantProviders is enabled, looks up the config from the tenant registry.
+ * Otherwise, uses the shared config.
+ */
+async function resolveOidcConfig(
+  config: AuthConfig,
+  token: string,
+  registry?: TenantRegistry,
+): Promise<TenantOidcConfig> {
+  if (config.perTenantProviders && registry) {
+    // Decode (not verify) the token to get the tenant claim
+    const decoded = decodeToken(token);
+    const tenantId = decoded[config.tenantClaim ?? 'tenant_id'];
+
+    if (typeof tenantId !== 'string') {
+      throw new AuthenticationError('Cannot determine tenant from token for per-tenant OIDC');
+    }
+
+    const tenant = await registry.get(tenantId);
+    if (!tenant) {
+      throw new AuthenticationError(`Unknown tenant: ${tenantId}`);
+    }
+
+    if (!tenant.config.oidc) {
+      throw new AuthenticationError(`No OIDC configuration for tenant: ${tenantId}`);
+    }
+
+    return tenant.config.oidc as TenantOidcConfig;
+  }
+
+  // Shared provider
+  if (!config.jwksUri) {
+    throw new AuthenticationError('No JWKS URI configured');
+  }
+
+  return {
+    jwksUri: config.jwksUri,
+    issuer: config.issuer ?? '',
+    audience: config.audience ?? '',
+  };
+}
+
+/**
+ * Express/Node request with an attached user.
+ */
+export interface AuthenticatedRequest extends IncomingMessage {
+  user?: TenantUser;
+}
+
+/**
+ * Extract the authenticated user from a request.
+ * Returns null if the request has not been authenticated.
+ */
+export function getUser(req: IncomingMessage): TenantUser | null {
+  return (req as AuthenticatedRequest).user ?? null;
+}
+
+/**
+ * Extract the authenticated user from a request, throwing if not authenticated.
+ */
+export function requireUser(req: IncomingMessage): TenantUser {
+  const user = getUser(req);
+  if (!user) {
+    throw new AuthenticationError('User not authenticated');
+  }
+  return user;
+}
