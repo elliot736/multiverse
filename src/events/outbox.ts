@@ -48,3 +48,55 @@ export class Outbox {
           event.aggregateId,
           event.aggregateType,
           event.eventType,
+          JSON.stringify(event.payload),
+          idempotencyKey,
+        ],
+      );
+    } catch (err) {
+      throw new OutboxPublishError(
+        `Failed to write event ${event.eventType} for aggregate ${event.aggregateId}`,
+        err instanceof Error ? err : new Error(String(err)),
+      );
+    }
+  }
+
+  /**
+   * Write multiple events to the outbox table in a single batch.
+   * All events are written using the same transaction client.
+   */
+  async publishMany(client: PoolClient, events: OutboxEvent[]): Promise<void> {
+    if (events.length === 0) return;
+
+    // Build a single multi-row INSERT for efficiency
+    const values: unknown[] = [];
+    const placeholders: string[] = [];
+
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i]!;
+      const offset = i * 5;
+      placeholders.push(
+        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`,
+      );
+      values.push(
+        event.aggregateId,
+        event.aggregateType,
+        event.eventType,
+        JSON.stringify(event.payload),
+        event.idempotencyKey ?? randomUUID(),
+      );
+    }
+
+    try {
+      await client.query(
+        `INSERT INTO _outbox (aggregate_id, aggregate_type, event_type, payload, idempotency_key)
+         VALUES ${placeholders.join(', ')}`,
+        values,
+      );
+    } catch (err) {
+      throw new OutboxPublishError(
+        `Failed to write ${events.length} events in batch`,
+        err instanceof Error ? err : new Error(String(err)),
+      );
+    }
+  }
+}
