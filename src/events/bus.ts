@@ -53,3 +53,60 @@ export class InMemoryEventBus implements EventBus {
     for (const handler of this.wildcardHandlers) {
       try {
         await handler(event);
+      } catch (err) {
+        errors.push(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+
+    if (errors.length > 0) {
+      throw errors[0];
+    }
+  }
+
+  subscribe(eventType: string, handler: EventHandler): void {
+    if (eventType === '*') {
+      this.wildcardHandlers.add(handler);
+      return;
+    }
+
+    let handlers = this.handlers.get(eventType);
+    if (!handlers) {
+      handlers = new Set();
+      this.handlers.set(eventType, handlers);
+    }
+    handlers.add(handler);
+  }
+
+  unsubscribe(eventType: string, handler: EventHandler): void {
+    if (eventType === '*') {
+      this.wildcardHandlers.delete(handler);
+      return;
+    }
+
+    const handlers = this.handlers.get(eventType);
+    if (handlers) {
+      handlers.delete(handler);
+      if (handlers.size === 0) {
+        this.handlers.delete(eventType);
+      }
+    }
+  }
+
+  /**
+   * Remove all handlers. Useful for testing.
+   */
+  clear(): void {
+    this.handlers.clear();
+    this.wildcardHandlers.clear();
+  }
+
+  /**
+   * Get the count of handlers for a specific event type (or '*' for wildcard).
+   */
+  handlerCount(eventType: string): number {
+    if (eventType === '*') {
+      return this.wildcardHandlers.size;
+    }
+    return this.handlers.get(eventType)?.size ?? 0;
+  }
+}
