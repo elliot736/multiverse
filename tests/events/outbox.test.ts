@@ -123,3 +123,130 @@ describe('Outbox', () => {
         eventType: 'invoice.finalized',
         payload: {
           lineItems: [
+            { sku: 'WIDGET', quantity: 3, unitPrice: 10.0 },
+            { sku: 'GADGET', quantity: 1, unitPrice: 25.0 },
+          ],
+          subtotal: 55.0,
+          tax: 4.95,
+          total: 59.95,
+          metadata: { notes: 'Rush order', internal: true },
+        },
+      };
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await outbox.publish(client as any, event);
+
+      const params = client._queries[0]!.params!;
+      const parsed = JSON.parse(params[3] as string);
+      expect(parsed.lineItems).toHaveLength(2);
+      expect(parsed.total).toBe(59.95);
+    });
+
+    it('handles empty payload', async () => {
+      const event: OutboxEvent = {
+        aggregateId: 'x',
+        aggregateType: 'x',
+        eventType: 'x.created',
+        payload: {},
+      };
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await outbox.publish(client as any, event);
+
+      const params = client._queries[0]!.params!;
+      expect(JSON.parse(params[3] as string)).toEqual({});
+    });
+
+    it('wraps non-Error throws in OutboxPublishError', async () => {
+      client.query.mockRejectedValueOnce('string error');
+
+      const event: OutboxEvent = {
+        aggregateId: 'x',
+        aggregateType: 'x',
+        eventType: 'x.created',
+        payload: {},
+      };
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await expect(outbox.publish(client as any, event)).rejects.toThrow(OutboxPublishError);
+    });
+  });
+
+  describe('publishMany', () => {
+    it('inserts multiple events in a single query', async () => {
+      const events: OutboxEvent[] = [
+        { aggregateId: 'order-1', aggregateType: 'order', eventType: 'order.created', payload: { total: 10 } },
+        { aggregateId: 'order-1', aggregateType: 'order', eventType: 'order.confirmed', payload: { confirmedAt: '2025-01-01' } },
+        { aggregateId: 'order-2', aggregateType: 'order', eventType: 'order.created', payload: { total: 20 } },
+      ];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await outbox.publishMany(client as any, events);
+
+      expect(client.query).toHaveBeenCalledTimes(1);
+      const params = client._queries[0]!.params!;
+      expect(params).toHaveLength(15);
+    });
+
+    it('does nothing for empty array', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await outbox.publishMany(client as any, []);
+      expect(client.query).not.toHaveBeenCalled();
+    });
+
+    it('preserves event order (aggregate ordering)', async () => {
+      const events: OutboxEvent[] = [
+        { aggregateId: 'agg-1', aggregateType: 'order', eventType: 'first', payload: {} },
+        { aggregateId: 'agg-1', aggregateType: 'order', eventType: 'second', payload: {} },
+        { aggregateId: 'agg-1', aggregateType: 'order', eventType: 'third', payload: {} },
+      ];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await outbox.publishMany(client as any, events);
+
+      const params = client._queries[0]!.params!;
+      expect(params[2]).toBe('first');
+      expect(params[7]).toBe('second');
+      expect(params[12]).toBe('third');
+    });
+
+    it('wraps errors in OutboxPublishError', async () => {
+      client.query.mockRejectedValueOnce(new Error('batch failed'));
+
+      const events: OutboxEvent[] = [
+        { aggregateId: '1', aggregateType: 'x', eventType: 'x', payload: {} },
+      ];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await expect(outbox.publishMany(client as any, events)).rejects.toThrow(OutboxPublishError);
+    });
+
+    it('handles a single event', async () => {
+      const events: OutboxEvent[] = [
+        { aggregateId: 'solo', aggregateType: 'test', eventType: 'test.created', payload: { x: 1 } },
+      ];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await outbox.publishMany(client as any, events);
+
+      expect(client.query).toHaveBeenCalledTimes(1);
+      const params = client._queries[0]!.params!;
+      expect(params).toHaveLength(5);
+      expect(params[0]).toBe('solo');
+    });
+
+    it('uses provided idempotency keys in batch', async () => {
+      const events: OutboxEvent[] = [
+        { aggregateId: '1', aggregateType: 'x', eventType: 'x', payload: {}, idempotencyKey: 'key-a' },
+        { aggregateId: '2', aggregateType: 'x', eventType: 'x', payload: {}, idempotencyKey: 'key-b' },
+      ];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await outbox.publishMany(client as any, events);
+
+      const params = client._queries[0]!.params!;
+      expect(params[4]).toBe('key-a');
+      expect(params[9]).toBe('key-b');
+    });
+  });
+});
