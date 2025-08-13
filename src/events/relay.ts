@@ -118,3 +118,120 @@ export class OutboxRelay {
       );
     } catch (err) {
       result.tenantErrors.push({
+        tenantId: '__discovery__',
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+      return result;
+    }
+
+    // Process each tenant's outbox
+    for (const schema of schemas) {
+      const tenantId = schema.schema_name.replace(/^tenant_/, '');
+      try {
+        const tenantResult = await this.processTenantOutbox(tenantId);
+        result.processed += tenantResult.processed;
+        result.failed += tenantResult.failed;
+      } catch (err) {
+        result.tenantErrors.push({
+          tenantId,
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+      }
+    }
+
+    return result;
+  }
+
+  private async processTenantOutbox(tenantId: string): Promise<{ processed: number; failed: number }> {
+    let processed = 0;
+    let failed = 0;
+
+    const client = await this.pool.getConnection(tenantId);
+    try {
+      // Read undelivered events
+      const result = await client.query(
+        `SELECT * FROM _outbox
+         WHERE delivered_at IS NULL AND retry_count < $1
+         ORDER BY id ASC
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED`,
+        [this.options.maxRetries, this.options.batchSize],
+      );
+
+      const rows = result.rows as OutboxRow[];
+
+      for (const row of rows) {
+        const event: DomainEvent = {
+          id: String(row.id),
+          tenantId,
+          aggregateId: row.aggregate_id,
+          aggregateType: row.aggregate_type,
+          eventType: row.event_type,
+          payload: typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload,
+          idempotencyKey: row.idempotency_key ?? String(row.id),
+          createdAt: new Date(row.created_at),
+        };
+
+        try {
+          await this.bus.publish(event);
+
+          // Mark as delivered
+          await client.query(
+            'UPDATE _outbox SET delivered_at = now() WHERE id = $1',
+            [row.id],
+          );
+          processed++;
+        } catch {
+          // Increment retry count
+          await client.query(
+            'UPDATE _outbox SET retry_count = retry_count + 1 WHERE id = $1',
+            [row.id],
+          );
+          failed++;
+        }
+      }
+    } finally {
+      client.release();
+    }
+
+    return { processed, failed };
+  }
+
+  /**
+   * Clean up old delivered events from all tenant schemas.
+   */
+  async cleanup(): Promise<number> {
+    let totalCleaned = 0;
+
+    const schemas = await this.pool.queryPublic<{ schema_name: string }>(
+      `SELECT schema_name FROM information_schema.schemata
+       WHERE schema_name LIKE 'tenant_%'
+       ORDER BY schema_name`,
+    );
+
+    for (const schema of schemas) {
+      const tenantId = schema.schema_name.replace(/^tenant_/, '');
+      const client = await this.pool.getConnection(tenantId);
+      try {
+        const result = await client.query(
+          `DELETE FROM _outbox
+           WHERE delivered_at IS NOT NULL
+             AND delivered_at < now() - interval '1 millisecond' * $1
+           RETURNING id`,
+          [this.options.cleanupAfterMs],
+        );
+        totalCleaned += result.rowCount ?? 0;
+      } finally {
+        client.release();
+      }
+    }
+
+    return totalCleaned;
+  }
+}
+
+export interface PollResult {
+  processed: number;
+  failed: number;
+  tenantErrors: Array<{ tenantId: string; error: Error }>;
+}
