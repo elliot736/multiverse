@@ -148,3 +148,152 @@ class TokenBucket {
       limit: this.capacity,
     };
   }
+
+  private refill(): void {
+    const now = Date.now();
+    const elapsed = (now - this.lastRefill) / 1000; // seconds
+    const tokensToAdd = elapsed * this.refillRate;
+
+    this.tokens = Math.min(this.capacity, this.tokens + tokensToAdd);
+    this.lastRefill = now;
+  }
+}
+
+/**
+ * Sliding window configuration.
+ */
+export interface SlidingWindowConfig {
+  /** Window duration in milliseconds */
+  windowMs: number;
+  /** Maximum requests allowed per window */
+  maxRequests: number;
+}
+
+/**
+ * Sliding window rate limiter.
+ *
+ * Tracks requests across two fixed windows and weights them by the overlap
+ * with the current sliding window. This provides a smooth approximation
+ * of a true sliding window without storing individual request timestamps.
+ *
+ * Example: windowMs=60000 (1 min), maxRequests=100 means 100 requests per
+ * rolling minute. The count smoothly transitions between windows.
+ */
+export class SlidingWindowLimiter implements RateLimiter {
+  private windows = new Map<string, SlidingWindowState>();
+  private readonly config: SlidingWindowConfig;
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(config: SlidingWindowConfig) {
+    if (config.windowMs <= 0)
+      throw new Error("Sliding window duration must be positive");
+    if (config.maxRequests <= 0)
+      throw new Error("Sliding window max requests must be positive");
+    this.config = config;
+
+    this.cleanupTimer = setInterval(() => this.cleanupStale(), 60_000);
+    if (this.cleanupTimer.unref) {
+      this.cleanupTimer.unref();
+    }
+  }
+
+  async consume(key: string, tokens: number = 1): Promise<RateLimitResult> {
+    const state = this.getOrCreateState(key);
+    const now = Date.now();
+    const windowStart = this.getWindowStart(now);
+
+    // Advance windows if needed
+    if (windowStart !== state.currentWindowStart) {
+      if (windowStart - state.currentWindowStart >= this.config.windowMs * 2) {
+        // Both windows are stale
+        state.previousCount = 0;
+        state.currentCount = 0;
+      } else {
+        // Shift windows
+        state.previousCount = state.currentCount;
+        state.currentCount = 0;
+      }
+      state.currentWindowStart = windowStart;
+    }
+
+    // Calculate weighted count using sliding window approximation
+    const elapsed = now - windowStart;
+    const weight = 1 - elapsed / this.config.windowMs;
+    const approximateCount =
+      state.currentCount + Math.floor(state.previousCount * weight);
+
+    if (approximateCount + tokens > this.config.maxRequests) {
+      // Calculate retry-after: time until enough requests expire from the previous window
+      const remaining = this.config.maxRequests - approximateCount;
+      const retryAfterMs =
+        remaining < 0
+          ? Math.ceil(this.config.windowMs - elapsed)
+          : Math.ceil(
+              (this.config.windowMs - elapsed) *
+                ((tokens - remaining) / (state.previousCount * weight || 1)),
+            );
+
+      return {
+        allowed: false,
+        remaining: Math.max(0, this.config.maxRequests - approximateCount),
+        retryAfterMs: Math.max(1, Math.min(retryAfterMs, this.config.windowMs)),
+        limit: this.config.maxRequests,
+      };
+    }
+
+    state.currentCount += tokens;
+
+    return {
+      allowed: true,
+      remaining: Math.max(
+        0,
+        this.config.maxRequests - approximateCount - tokens,
+      ),
+      limit: this.config.maxRequests,
+    };
+  }
+
+  async reset(key: string): Promise<void> {
+    this.windows.delete(key);
+  }
+
+  destroy(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+  }
+
+  private getOrCreateState(key: string): SlidingWindowState {
+    let state = this.windows.get(key);
+    if (!state) {
+      state = {
+        currentWindowStart: this.getWindowStart(Date.now()),
+        currentCount: 0,
+        previousCount: 0,
+      };
+      this.windows.set(key, state);
+    }
+    return state;
+  }
+
+  private getWindowStart(now: number): number {
+    return Math.floor(now / this.config.windowMs) * this.config.windowMs;
+  }
+
+  private cleanupStale(): void {
+    const now = Date.now();
+    const staleThreshold = now - this.config.windowMs * 3;
+    for (const [key, state] of this.windows) {
+      if (state.currentWindowStart < staleThreshold) {
+        this.windows.delete(key);
+      }
+    }
+  }
+}
+
+interface SlidingWindowState {
+  currentWindowStart: number;
+  currentCount: number;
+  previousCount: number;
+}
