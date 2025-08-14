@@ -183,3 +183,191 @@ describe('OutboxRelay', () => {
       expect(result.processed).toBe(1);
     });
 
+    it('returns empty result when no schemas exist', async () => {
+      const { pool } = createMockPoolAndClient([], []);
+      const relay = new OutboxRelay(pool, bus);
+      const result = await relay.pollOnce();
+
+      expect(result.processed).toBe(0);
+      expect(result.failed).toBe(0);
+      expect(result.tenantErrors).toHaveLength(0);
+    });
+
+    it('handles schema discovery error', async () => {
+      const pool = {
+        getConnection: vi.fn(),
+        queryPublic: vi.fn(async () => {
+          throw new Error('database unavailable');
+        }),
+      } as unknown as TenantPool;
+
+      const relay = new OutboxRelay(pool, bus);
+      const result = await relay.pollOnce();
+
+      expect(result.tenantErrors).toHaveLength(1);
+      expect(result.tenantErrors[0]!.tenantId).toBe('__discovery__');
+    });
+
+    it('handles empty outbox for a tenant', async () => {
+      const { pool } = createMockPoolAndClient(
+        [{ schema_name: 'tenant_acme' }],
+        [], // No outbox rows
+      );
+
+      const relay = new OutboxRelay(pool, bus);
+      const result = await relay.pollOnce();
+
+      expect(result.processed).toBe(0);
+      expect(result.failed).toBe(0);
+    });
+  });
+
+  describe('start and stop', () => {
+    it('starts and stops the relay', async () => {
+      const { pool } = createMockPoolAndClient([], []);
+      const relay = new OutboxRelay(pool, bus, { pollIntervalMs: 50 });
+
+      await relay.start();
+      expect(relay.isRunning).toBe(true);
+
+      await relay.stop();
+      expect(relay.isRunning).toBe(false);
+    });
+
+    it('is idempotent on start', async () => {
+      const { pool } = createMockPoolAndClient([], []);
+      const relay = new OutboxRelay(pool, bus, { pollIntervalMs: 50 });
+
+      await relay.start();
+      await relay.start();
+      await relay.stop();
+    });
+
+    it('stop is safe to call without start', async () => {
+      const { pool } = createMockPoolAndClient([], []);
+      const relay = new OutboxRelay(pool, bus);
+      await relay.stop(); // Should not throw
+    });
+  });
+
+  describe('event mapping', () => {
+    it('correctly maps outbox rows to domain events', async () => {
+      const row = makeOutboxRow({
+        id: '77',
+        aggregate_id: 'inv-42',
+        aggregate_type: 'invoice',
+        event_type: 'invoice.paid',
+        payload: { amount: 150.00, currency: 'EUR' },
+        idempotency_key: 'idem-77',
+        created_at: new Date('2025-03-15T10:30:00Z'),
+      });
+
+      const { pool } = createMockPoolAndClient(
+        [{ schema_name: 'tenant_acme' }],
+        [row],
+      );
+
+      const events: DomainEvent[] = [];
+      bus.subscribe('*', async (e) => events.push(e));
+
+      const relay = new OutboxRelay(pool, bus);
+      await relay.pollOnce();
+
+      expect(events).toHaveLength(1);
+      const event = events[0]!;
+      expect(event.id).toBe('77');
+      expect(event.tenantId).toBe('acme');
+      expect(event.aggregateId).toBe('inv-42');
+      expect(event.aggregateType).toBe('invoice');
+      expect(event.eventType).toBe('invoice.paid');
+      expect(event.payload).toEqual({ amount: 150.00, currency: 'EUR' });
+      expect(event.idempotencyKey).toBe('idem-77');
+      expect(event.createdAt).toEqual(new Date('2025-03-15T10:30:00Z'));
+    });
+
+    it('uses row id as idempotency key when null', async () => {
+      const row = makeOutboxRow({ id: '55', idempotency_key: null });
+
+      const { pool } = createMockPoolAndClient(
+        [{ schema_name: 'tenant_acme' }],
+        [row],
+      );
+
+      const events: DomainEvent[] = [];
+      bus.subscribe('*', async (e) => events.push(e));
+
+      const relay = new OutboxRelay(pool, bus);
+      await relay.pollOnce();
+
+      expect(events[0]!.idempotencyKey).toBe('55');
+    });
+
+    it('handles string payload that needs parsing', async () => {
+      const row = makeOutboxRow({
+        payload: '{"key": "value"}' as unknown as Record<string, unknown>,
+      });
+
+      const { pool } = createMockPoolAndClient(
+        [{ schema_name: 'tenant_acme' }],
+        [row],
+      );
+
+      const events: DomainEvent[] = [];
+      bus.subscribe('*', async (e) => events.push(e));
+
+      const relay = new OutboxRelay(pool, bus);
+      await relay.pollOnce();
+
+      expect(events[0]!.payload).toEqual({ key: 'value' });
+    });
+  });
+
+  describe('batch processing', () => {
+    it('processes events in order within a tenant', async () => {
+      const rows = [
+        makeOutboxRow({ id: '1', event_type: 'first' }),
+        makeOutboxRow({ id: '2', event_type: 'second' }),
+        makeOutboxRow({ id: '3', event_type: 'third' }),
+      ];
+
+      const { pool } = createMockPoolAndClient(
+        [{ schema_name: 'tenant_acme' }],
+        rows,
+      );
+
+      const eventTypes: string[] = [];
+      bus.subscribe('*', async (e) => eventTypes.push(e.eventType));
+
+      const relay = new OutboxRelay(pool, bus);
+      await relay.pollOnce();
+
+      expect(eventTypes).toEqual(['first', 'second', 'third']);
+    });
+  });
+
+  describe('cleanup', () => {
+    it('deletes old delivered events', async () => {
+      const { pool, mockClient } = createMockPoolAndClient(
+        [{ schema_name: 'tenant_acme' }],
+        [],
+      );
+
+      // For cleanup, queryPublic needs to return schemas
+      (pool.queryPublic as ReturnType<typeof vi.fn>).mockImplementation(async (sql: string) => {
+        if (sql.includes('information_schema.schemata')) {
+          return [{ schema_name: 'tenant_acme' }];
+        }
+        return [];
+      });
+
+      const relay = new OutboxRelay(pool, bus);
+      const cleaned = await relay.cleanup();
+
+      expect(cleaned).toBeGreaterThanOrEqual(0);
+      const deleteQueries = mockClient._executedQueries.filter(
+        (q) => q.sql.includes('DELETE FROM _outbox'),
+      );
+      expect(deleteQueries).toHaveLength(1);
+    });
+  });
+});
