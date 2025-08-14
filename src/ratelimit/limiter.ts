@@ -63,3 +63,69 @@ export class TenantRateLimiter {
     // Check for tenant-specific rate limit overrides
     if (tenant.config.rateLimitOverrides) {
       const overrides = tenant.config.rateLimitOverrides;
+      if (this.config.strategy.type === 'token-bucket') {
+        const customConfig: TokenBucketStrategyConfig = {
+          type: 'token-bucket',
+          capacity: overrides.burstCapacity ?? (this.config.strategy as TokenBucketConfig).capacity,
+          refillRate: overrides.requestsPerSecond ?? (this.config.strategy as TokenBucketConfig).refillRate,
+        };
+        const customLimiter = this.createLimiter(customConfig);
+        const key = this.buildKey(tenant);
+        return customLimiter.consume(key, tokens);
+      }
+    }
+
+    // Use tier-specific limiter if available
+    const limiter = this.tierLimiters.get(tenant.tier) ?? this.defaultLimiter;
+    const key = this.buildKey(tenant);
+    return limiter.consume(key, tokens);
+  }
+
+  /**
+   * Reset rate limit state for the current tenant.
+   */
+  async reset(): Promise<void> {
+    const tenant = TenantContext.current();
+    const key = this.buildKey(tenant);
+    const limiter = this.tierLimiters.get(tenant.tier) ?? this.defaultLimiter;
+    await limiter.reset(key);
+  }
+
+  /**
+   * Destroy all limiters and clean up timers.
+   */
+  destroy(): void {
+    this.destroyLimiter(this.defaultLimiter);
+    for (const limiter of this.tierLimiters.values()) {
+      this.destroyLimiter(limiter);
+    }
+  }
+
+  private buildKey(tenant: Tenant): string {
+    const suffix = this.config.keySuffix?.(tenant) ?? '';
+    return suffix ? `${tenant.id}:${suffix}` : tenant.id;
+  }
+
+  private createLimiter(config: TokenBucketStrategyConfig | SlidingWindowStrategyConfig): RateLimiter {
+    switch (config.type) {
+      case 'token-bucket':
+        return new TokenBucketLimiter({
+          capacity: config.capacity,
+          refillRate: config.refillRate,
+        });
+      case 'sliding-window':
+        return new SlidingWindowLimiter({
+          windowMs: config.windowMs,
+          maxRequests: config.maxRequests,
+        });
+    }
+  }
+
+  private destroyLimiter(limiter: RateLimiter): void {
+    if (limiter instanceof TokenBucketLimiter) {
+      limiter.destroy();
+    } else if (limiter instanceof SlidingWindowLimiter) {
+      limiter.destroy();
+    }
+  }
+}
