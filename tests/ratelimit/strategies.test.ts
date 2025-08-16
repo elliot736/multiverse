@@ -128,3 +128,131 @@ describe('TokenBucketLimiter', () => {
     expect(allowed).toBe(5);
     expect(denied).toBe(5);
   });
+
+  it('recovery after exhaustion with fast refill', async () => {
+    limiter = new TokenBucketLimiter({ capacity: 2, refillRate: 200 });
+
+    // Exhaust
+    await limiter.consume('tenant-a');
+    await limiter.consume('tenant-a');
+    expect((await limiter.consume('tenant-a')).allowed).toBe(false);
+
+    // Wait for refill
+    await new Promise((r) => setTimeout(r, 30));
+
+    const result = await limiter.consume('tenant-a');
+    expect(result.allowed).toBe(true);
+  });
+
+  it('destroy stops cleanup timer', () => {
+    limiter = new TokenBucketLimiter({ capacity: 5, refillRate: 1 });
+    limiter.destroy();
+    // Calling destroy again should be safe
+    limiter.destroy();
+  });
+});
+
+describe('SlidingWindowLimiter', () => {
+  let limiter: SlidingWindowLimiter;
+
+  afterEach(() => {
+    limiter?.destroy();
+  });
+
+  it('allows requests within the window limit', async () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 60_000, maxRequests: 5 });
+
+    for (let i = 0; i < 5; i++) {
+      const result = await limiter.consume('tenant-a');
+      expect(result.allowed).toBe(true);
+    }
+  });
+
+  it('rejects requests exceeding the window limit', async () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 60_000, maxRequests: 3 });
+
+    for (let i = 0; i < 3; i++) {
+      await limiter.consume('tenant-a');
+    }
+
+    const result = await limiter.consume('tenant-a');
+    expect(result.allowed).toBe(false);
+    expect(result.remaining).toBe(0);
+    expect(result.retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it('isolates keys (per-tenant)', async () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 60_000, maxRequests: 2 });
+
+    await limiter.consume('tenant-a');
+    await limiter.consume('tenant-a');
+    expect((await limiter.consume('tenant-a')).allowed).toBe(false);
+
+    const result = await limiter.consume('tenant-b');
+    expect(result.allowed).toBe(true);
+  });
+
+  it('supports consuming multiple tokens', async () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 60_000, maxRequests: 10 });
+
+    const r1 = await limiter.consume('tenant-a', 8);
+    expect(r1.allowed).toBe(true);
+    expect(r1.remaining).toBe(2);
+
+    const r2 = await limiter.consume('tenant-a', 3);
+    expect(r2.allowed).toBe(false);
+  });
+
+  it('reports correct limit', async () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 60_000, maxRequests: 100 });
+    const result = await limiter.consume('tenant-a');
+    expect(result.limit).toBe(100);
+  });
+
+  it('resets a key', async () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 60_000, maxRequests: 2 });
+
+    await limiter.consume('tenant-a');
+    await limiter.consume('tenant-a');
+    expect((await limiter.consume('tenant-a')).allowed).toBe(false);
+
+    await limiter.reset('tenant-a');
+
+    const result = await limiter.consume('tenant-a');
+    expect(result.allowed).toBe(true);
+  });
+
+  it('throws on invalid config', () => {
+    expect(() => new SlidingWindowLimiter({ windowMs: 0, maxRequests: 10 })).toThrow();
+    expect(() => new SlidingWindowLimiter({ windowMs: 1000, maxRequests: 0 })).toThrow();
+    expect(() => new SlidingWindowLimiter({ windowMs: -1, maxRequests: 10 })).toThrow();
+    expect(() => new SlidingWindowLimiter({ windowMs: 1000, maxRequests: -1 })).toThrow();
+  });
+
+  it('retryAfterMs is bounded by windowMs', async () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 5000, maxRequests: 1 });
+
+    await limiter.consume('tenant-a');
+    const result = await limiter.consume('tenant-a');
+    expect(result.allowed).toBe(false);
+    expect(result.retryAfterMs).toBeLessThanOrEqual(5000);
+    expect(result.retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it('handles concurrent consume calls', async () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 60_000, maxRequests: 5 });
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => limiter.consume('tenant-a')),
+    );
+
+    const allowed = results.filter((r) => r.allowed).length;
+    expect(allowed).toBe(5);
+  });
+
+  it('destroy stops cleanup timer', () => {
+    limiter = new SlidingWindowLimiter({ windowMs: 60_000, maxRequests: 10 });
+    limiter.destroy();
+    limiter.destroy(); // safe to call again
+  });
+});
