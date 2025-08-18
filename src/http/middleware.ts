@@ -78,3 +78,80 @@ export function createMultiverseMiddleware(config: MultiverseConfig): Middleware
       res.end(JSON.stringify({ error: `Tenant not found: ${tenantId}` }));
       return;
     }
+
+    if (tenant.status === 'suspended') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Tenant suspended: ${tenantId}` }));
+      return;
+    }
+
+    // Set tenant ID on request for easy access
+    (req as TenantRequest).tenantId = tenantId;
+
+    // 4. Run everything else within tenant context
+    return TenantContext.run(tenant, async () => {
+      // 5. Auth
+      if (authMw) {
+        let authCalled = false;
+        await authMw(req, res, async () => {
+          authCalled = true;
+        });
+        if (!authCalled) return; // Auth middleware handled the response (e.g., 401)
+      }
+
+      // 6. Rate limit
+      if (rateLimitMw) {
+        let rateLimitCalled = false;
+        await rateLimitMw(req, res, async () => {
+          rateLimitCalled = true;
+        });
+        if (!rateLimitCalled) return; // Rate limit middleware handled the response (e.g., 429)
+      }
+
+      // 7. Call the actual handler
+      return next();
+    });
+  };
+}
+
+/**
+ * Check if a path matches any of the public paths.
+ */
+function isPublicPath(path: string, publicPaths: string[]): boolean {
+  for (const publicPath of publicPaths) {
+    if (publicPath.endsWith('*')) {
+      // Prefix match
+      const prefix = publicPath.slice(0, -1);
+      if (path.startsWith(prefix)) return true;
+    } else {
+      // Exact match
+      if (path === publicPath) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Utility to compose multiple middleware functions into a single middleware.
+ */
+export function composeMiddleware(...middlewares: Middleware[]): Middleware {
+  return async (req, res, next) => {
+    let index = -1;
+
+    async function dispatch(i: number): Promise<void> {
+      if (i <= index) {
+        throw new Error('next() called multiple times');
+      }
+      index = i;
+
+      if (i === middlewares.length) {
+        return next();
+      }
+
+      const middleware = middlewares[i]!;
+      return middleware(req, res, () => dispatch(i + 1));
+    }
+
+    return dispatch(0);
+  };
+}
