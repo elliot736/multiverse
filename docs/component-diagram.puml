@@ -1,0 +1,133 @@
+@startuml component-diagram
+skinparam componentStyle rectangle
+skinparam defaultTextAlignment center
+
+title Multiverse — Component Diagram
+
+' ──────────────────────────────────────
+' External actors
+' ──────────────────────────────────────
+actor "Client" as client
+database "PostgreSQL" as pg
+
+' ──────────────────────────────────────
+' Modules
+' ──────────────────────────────────────
+package "Multiverse Framework" {
+
+  component [HTTP Module] as http {
+    portin "incoming request" as httpIn
+    portout "handler response" as httpOut
+    card "createMultiverseMiddleware()" as createMw
+    card "composeMiddleware()" as composeMw
+    card "MultiverseConfig" as mvConfig
+    card "TenantRequest" as tenantReq
+  }
+
+  component [Tenant Module] as tenant {
+    card "TenantContext\n(AsyncLocalStorage)" as tenantCtx
+    card "TenantResolver" as resolver
+    card "HeaderTenantResolver" as headerRes
+    card "SubdomainTenantResolver" as subdomainRes
+    card "PathTenantResolver" as pathRes
+    card "JwtTenantResolver" as jwtRes
+    card "ChainTenantResolver" as chainRes
+    card "TenantRegistry" as registry
+    card "MemoryTenantRegistry" as memReg
+    card "PostgresTenantRegistry" as pgReg
+  }
+
+  component [Auth Module] as auth {
+    card "authMiddleware()" as authMw
+    card "verifyToken() / decodeToken()" as oidc
+    card "TenantUser" as tenantUser
+    card "AuthConfig" as authCfg
+  }
+
+  component [Rate Limit Module] as ratelimit {
+    card "TenantRateLimiter" as tenantRL
+    card "rateLimitMiddleware()" as rlMw
+    card "TokenBucketLimiter" as tokenBucket
+    card "SlidingWindowLimiter" as slidingWindow
+  }
+
+  component [DB Module] as db {
+    card "TenantPool" as pool
+    card "TenantQuery" as query
+    card "TenantMigrator" as migrator
+    card "TransactionScope" as txScope
+  }
+
+  component [Events Module] as events {
+    card "Outbox" as outbox
+    card "OutboxRelay" as relay
+    card "EventBus" as eventBus
+    card "InMemoryEventBus" as memBus
+  }
+
+  component [Errors] as errors {
+    card "MultiverseError\nhierarchy" as errBase
+  }
+}
+
+' ──────────────────────────────────────
+' Request pipeline (numbered sequence)
+' ──────────────────────────────────────
+client --> httpIn : "1. HTTP Request"
+
+http --> tenant : "2. Resolve tenant ID\n   (TenantResolver)"
+tenant --> tenant : "3. Look up tenant\n   (TenantRegistry.get)"
+tenant --> tenantCtx : "4. TenantContext.run()\n   propagate via AsyncLocalStorage"
+
+http --> auth : "5. Validate JWT\n   (authMiddleware)"
+auth --> oidc : "verify signature,\nissuer, audience"
+auth --> tenantCtx : "cross-reference\ntenant claim"
+
+http --> ratelimit : "6. Check rate limit\n   (rateLimitMiddleware)"
+ratelimit --> tenantCtx : "read tenant + tier"
+ratelimit --> tenantRL : "consume tokens"
+
+httpOut --> client : "7. Response"
+
+' ──────────────────────────────────────
+' Handler data access
+' ──────────────────────────────────────
+query --> pool : "getConnection()\nSET search_path"
+pool --> pg : "tenant-scoped\nSQL queries"
+query --> tenantCtx : "read current tenant"
+migrator --> pool : "CREATE SCHEMA\nrun migrations"
+outbox --> pg : "INSERT INTO _outbox\n(within transaction)"
+
+' ──────────────────────────────────────
+' Background: Outbox relay
+' ──────────────────────────────────────
+relay --> pool : "poll _outbox tables\nacross all schemas"
+relay --> eventBus : "publish DomainEvent"
+memBus -.-> eventBus : implements
+
+' ──────────────────────────────────────
+' Cross-module dependencies
+' ──────────────────────────────────────
+pgReg --> pg : "public.tenants table"
+authMw ..> registry : "per-tenant OIDC lookup"
+errors <.. http : throws
+errors <.. db : throws
+errors <.. auth : throws
+errors <.. events : throws
+
+' ──────────────────────────────────────
+' Legend
+' ──────────────────────────────────────
+legend right
+  |= Flow |= Description |
+  | 1 | Client sends HTTP request |
+  | 2 | Public path check, then resolve tenant ID |
+  | 3 | Validate tenant exists and is active |
+  | 4 | Wrap remainder in TenantContext.run() |
+  | 5 | JWT verification + tenant cross-reference |
+  | 6 | Per-tenant rate limiting (tier-aware) |
+  | 7 | Handler executes with TenantQuery / Outbox |
+  | BG | OutboxRelay polls _outbox, publishes to EventBus |
+endlegend
+
+@enduml
