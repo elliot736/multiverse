@@ -348,3 +348,346 @@ describe('Integration: Event Bus', () => {
 
     await bus.publish({
       id: '1',
+      tenantId: 'acme',
+      aggregateId: 'ord-1',
+      aggregateType: 'order',
+      eventType: 'order.created',
+      payload: { total: 42 },
+      idempotencyKey: 'k1',
+      createdAt: new Date(),
+    });
+
+    await bus.publish({
+      id: '2',
+      tenantId: 'acme',
+      aggregateId: 'ord-1',
+      aggregateType: 'order',
+      eventType: 'order.shipped',
+      payload: { trackingNumber: 'TRK123' },
+      idempotencyKey: 'k2',
+      createdAt: new Date(),
+    });
+
+    expect(received).toHaveLength(2);
+    expect(received[0]!.eventType).toBe('order.created');
+    expect(received[1]!.eventType).toBe('order.shipped');
+  });
+
+  it('wildcard handler receives all events', async () => {
+    const bus = new InMemoryEventBus();
+    const all: string[] = [];
+
+    bus.subscribe('*', async (event) => {
+      all.push(event.eventType);
+    });
+
+    for (const type of ['a', 'b', 'c']) {
+      await bus.publish({
+        id: type,
+        tenantId: 'acme',
+        aggregateId: '1',
+        aggregateType: 'test',
+        eventType: type,
+        payload: {},
+        idempotencyKey: type,
+        createdAt: new Date(),
+      });
+    }
+
+    expect(all).toEqual(['a', 'b', 'c']);
+  });
+
+  it('unsubscribe stops delivery', async () => {
+    const bus = new InMemoryEventBus();
+    const received: string[] = [];
+    const handler = async (event: DomainEvent) => {
+      received.push(event.eventType);
+    };
+
+    bus.subscribe('test', handler);
+
+    const makeEvent = (id: string): DomainEvent => ({
+      id,
+      tenantId: 'acme',
+      aggregateId: '1',
+      aggregateType: 'test',
+      eventType: 'test',
+      payload: {},
+      idempotencyKey: id,
+      createdAt: new Date(),
+    });
+
+    await bus.publish(makeEvent('1'));
+    bus.unsubscribe('test', handler);
+    await bus.publish(makeEvent('2'));
+
+    expect(received).toHaveLength(1);
+  });
+
+  it('error in handler does not break other handlers', async () => {
+    const bus = new InMemoryEventBus();
+    let secondHandlerCalled = false;
+
+    bus.subscribe('test', async () => {
+      throw new Error('fail');
+    });
+    bus.subscribe('test', async () => {
+      secondHandlerCalled = true;
+    });
+
+    const event: DomainEvent = {
+      id: '1',
+      tenantId: 'acme',
+      aggregateId: '1',
+      aggregateType: 'test',
+      eventType: 'test',
+      payload: {},
+      idempotencyKey: '1',
+      createdAt: new Date(),
+    };
+
+    try { await bus.publish(event); } catch { /* expected */ }
+    expect(secondHandlerCalled).toBe(true);
+  });
+});
+
+describe('Integration: Tenant Context propagation', () => {
+  it('propagates tenant through async call chain', async () => {
+    const tenant: Tenant = {
+      id: 'acme',
+      name: 'Acme',
+      slug: 'acme',
+      tier: 'professional',
+      status: 'active',
+      config: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    async function handleRequest() {
+      const t = TenantContext.current();
+      expect(t.id).toBe('acme');
+      return await processOrder();
+    }
+
+    async function processOrder() {
+      await new Promise((r) => setTimeout(r, 5));
+      const t = TenantContext.current();
+      expect(t.id).toBe('acme');
+      return await saveOrder();
+    }
+
+    async function saveOrder() {
+      const t = TenantContext.current();
+      expect(t.id).toBe('acme');
+      return 'saved';
+    }
+
+    const result = await TenantContext.run(tenant, handleRequest);
+    expect(result).toBe('saved');
+  });
+
+  it('concurrent requests do not leak tenant context', async () => {
+    const tenants = ['alpha', 'beta', 'gamma', 'delta'].map(id => ({
+      id,
+      name: id,
+      slug: id,
+      tier: 'free' as const,
+      status: 'active' as const,
+      config: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
+
+    const results = await Promise.all(
+      tenants.map((tenant) =>
+        TenantContext.run(tenant, async () => {
+          await new Promise((r) => setTimeout(r, Math.random() * 20));
+          return TenantContext.current().id;
+        }),
+      ),
+    );
+
+    expect(results).toEqual(['alpha', 'beta', 'gamma', 'delta']);
+  });
+
+  it('many concurrent requests maintain isolation', async () => {
+    const count = 50;
+    const tenants = Array.from({ length: count }, (_, i) => ({
+      id: `tenant-${i}`,
+      name: `T${i}`,
+      slug: `t-${i}`,
+      tier: 'free' as const,
+      status: 'active' as const,
+      config: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }));
+
+    const results = await Promise.all(
+      tenants.map((tenant) =>
+        TenantContext.run(tenant, async () => {
+          await new Promise((r) => setTimeout(r, Math.random() * 10));
+          return TenantContext.current().id;
+        }),
+      ),
+    );
+
+    for (let i = 0; i < count; i++) {
+      expect(results[i]).toBe(`tenant-${i}`);
+    }
+  });
+});
+
+describe('Integration: Chain Resolver with middleware', () => {
+  it('falls back through resolver chain', async () => {
+    const registry = new MemoryTenantRegistry();
+    await registry.create({ id: 'pathco', name: 'Path Co', slug: 'pathco' });
+    await registry.update('pathco', { status: 'active' });
+
+    const middleware = createMultiverseMiddleware({
+      resolver: new ChainTenantResolver([
+        new HeaderTenantResolver(),
+        new PathTenantResolver(),
+      ]),
+      registry,
+      auth: { skipAuth: true },
+    });
+
+    const req = mockReq({ url: '/pathco/api/data' });
+    const res = mockRes();
+    let tenantId: string | null = null;
+
+    await middleware(req, res as unknown as ServerResponse, async () => {
+      tenantId = TenantContext.current().id;
+    });
+
+    expect(tenantId).toBe('pathco');
+  });
+
+  it('uses header when both header and path are available', async () => {
+    const registry = new MemoryTenantRegistry();
+    await registry.create({ id: 'acme', name: 'Acme', slug: 'acme' });
+    await registry.update('acme', { status: 'active' });
+    await registry.create({ id: 'globex', name: 'Globex', slug: 'globex' });
+    await registry.update('globex', { status: 'active' });
+
+    const middleware = createMultiverseMiddleware({
+      resolver: new ChainTenantResolver([
+        new HeaderTenantResolver(),
+        new PathTenantResolver(),
+      ]),
+      registry,
+      auth: { skipAuth: true },
+    });
+
+    // Header says 'acme', path says 'globex'
+    const req = mockReq({ headers: { 'x-tenant-id': 'acme' }, url: '/globex/api' });
+    const res = mockRes();
+    let tenantId: string | null = null;
+
+    await middleware(req, res as unknown as ServerResponse, async () => {
+      tenantId = TenantContext.current().id;
+    });
+
+    expect(tenantId).toBe('acme'); // Header takes priority
+  });
+});
+
+describe('Integration: composeMiddleware', () => {
+  it('executes middleware in order', async () => {
+    const order: string[] = [];
+
+    const mw1 = async (_req: IncomingMessage, _res: ServerResponse, next: () => Promise<void>) => {
+      order.push('mw1-before');
+      await next();
+      order.push('mw1-after');
+    };
+
+    const mw2 = async (_req: IncomingMessage, _res: ServerResponse, next: () => Promise<void>) => {
+      order.push('mw2-before');
+      await next();
+      order.push('mw2-after');
+    };
+
+    const composed = composeMiddleware(mw1, mw2);
+    const req = mockReq();
+    const res = mockRes();
+
+    await composed(req, res as unknown as ServerResponse, async () => {
+      order.push('handler');
+    });
+
+    expect(order).toEqual(['mw1-before', 'mw2-before', 'handler', 'mw2-after', 'mw1-after']);
+  });
+
+  it('short-circuits when middleware does not call next', async () => {
+    const order: string[] = [];
+
+    const blocker = async (_req: IncomingMessage, _res: ServerResponse, _next: () => Promise<void>) => {
+      order.push('blocked');
+    };
+
+    const after = async (_req: IncomingMessage, _res: ServerResponse, next: () => Promise<void>) => {
+      order.push('should-not-run');
+      await next();
+    };
+
+    const composed = composeMiddleware(blocker, after);
+    const req = mockReq();
+    const res = mockRes();
+
+    await composed(req, res as unknown as ServerResponse, async () => {
+      order.push('handler-should-not-run');
+    });
+
+    expect(order).toEqual(['blocked']);
+  });
+
+  it('throws when next is called multiple times', async () => {
+    const badMiddleware = async (_req: IncomingMessage, _res: ServerResponse, next: () => Promise<void>) => {
+      await next();
+      await expect(next()).rejects.toThrow('next() called multiple times');
+    };
+
+    const composed = composeMiddleware(badMiddleware);
+    const req = mockReq();
+    const res = mockRes();
+
+    await composed(req, res as unknown as ServerResponse, async () => {});
+  });
+
+  it('handles empty middleware array', async () => {
+    const composed = composeMiddleware();
+    const req = mockReq();
+    const res = mockRes();
+    let handlerCalled = false;
+
+    await composed(req, res as unknown as ServerResponse, async () => {
+      handlerCalled = true;
+    });
+
+    expect(handlerCalled).toBe(true);
+  });
+});
+
+describe('Integration: Errors module', () => {
+  it('all error classes have proper inheritance', () => {
+    expect(new TenantNotFoundError('x')).toBeInstanceOf(MultiverseError);
+    expect(new CrossTenantAccessError('a', 'b')).toBeInstanceOf(MultiverseError);
+    expect(new NoTenantContextError()).toBeInstanceOf(MultiverseError);
+    expect(new RateLimitExceededError('x', 1000)).toBeInstanceOf(MultiverseError);
+    expect(new OutboxPublishError('msg', new Error('e'))).toBeInstanceOf(MultiverseError);
+    expect(new AuthenticationError('msg')).toBeInstanceOf(MultiverseError);
+    expect(new TenantResolutionError('msg')).toBeInstanceOf(MultiverseError);
+    expect(new MigrationError('t', 'm', 'msg')).toBeInstanceOf(MultiverseError);
+  });
+
+  it('error classes have correct names', () => {
+    const tnf = new TenantNotFoundError('x');
+    expect(tnf.name).toBe('TenantNotFoundError');
+
+    const cta = new CrossTenantAccessError('a', 'b');
+    expect(cta.name).toBe('CrossTenantAccessError');
+  });
+});
