@@ -1,133 +1,75 @@
-@startuml component-diagram
-skinparam componentStyle rectangle
-skinparam defaultTextAlignment center
+@startuml sequence-diagram
+title Multiverse — Request Pipeline
 
-title Multiverse — Component Diagram
-
-' ──────────────────────────────────────
-' External actors
-' ──────────────────────────────────────
-actor "Client" as client
+actor Client
+participant "Middleware\n(createMultiverseMiddleware)" as mw
+participant "TenantResolver" as resolver
+participant "TenantRegistry" as registry
+participant "TenantContext" as ctx
+participant "authMiddleware" as auth
+participant "OIDC\n(verifyToken)" as oidc
+participant "rateLimitMiddleware" as rl
+participant "TenantRateLimiter" as limiter
+participant "Handler" as handler
+participant "TenantQuery" as query
+participant "TenantPool" as pool
 database "PostgreSQL" as pg
 
-' ──────────────────────────────────────
-' Modules
-' ──────────────────────────────────────
-package "Multiverse Framework" {
+== Tenant Resolution ==
 
-  component [HTTP Module] as http {
-    portin "incoming request" as httpIn
-    portout "handler response" as httpOut
-    card "createMultiverseMiddleware()" as createMw
-    card "composeMiddleware()" as composeMw
-    card "MultiverseConfig" as mvConfig
-    card "TenantRequest" as tenantReq
-  }
+Client -> mw : HTTP request
+mw -> resolver : resolve(req)
+note right of resolver : HeaderResolver / SubdomainResolver\nPathResolver / JwtResolver / ChainResolver
+resolver --> mw : tenantId
 
-  component [Tenant Module] as tenant {
-    card "TenantContext\n(AsyncLocalStorage)" as tenantCtx
-    card "TenantResolver" as resolver
-    card "HeaderTenantResolver" as headerRes
-    card "SubdomainTenantResolver" as subdomainRes
-    card "PathTenantResolver" as pathRes
-    card "JwtTenantResolver" as jwtRes
-    card "ChainTenantResolver" as chainRes
-    card "TenantRegistry" as registry
-    card "MemoryTenantRegistry" as memReg
-    card "PostgresTenantRegistry" as pgReg
-  }
+mw -> registry : get(tenantId)
+note right of registry : MemoryTenantRegistry\nor PostgresTenantRegistry
+registry --> mw : Tenant { id, name, tier, config }
 
-  component [Auth Module] as auth {
-    card "authMiddleware()" as authMw
-    card "verifyToken() / decodeToken()" as oidc
-    card "TenantUser" as tenantUser
-    card "AuthConfig" as authCfg
-  }
+mw -> ctx : TenantContext.run(tenant, callback)
+note right of ctx : AsyncLocalStorage propagates\ntenant through async call chain
 
-  component [Rate Limit Module] as ratelimit {
-    card "TenantRateLimiter" as tenantRL
-    card "rateLimitMiddleware()" as rlMw
-    card "TokenBucketLimiter" as tokenBucket
-    card "SlidingWindowLimiter" as slidingWindow
-  }
+== Authentication ==
 
-  component [DB Module] as db {
-    card "TenantPool" as pool
-    card "TenantQuery" as query
-    card "TenantMigrator" as migrator
-    card "TransactionScope" as txScope
-  }
+ctx -> auth : authMiddleware(req, res, next)
+auth -> oidc : verifyToken(token, config)
+oidc -> oidc : fetch JWKS, validate signature
+oidc --> auth : decoded claims
+auth -> auth : cross-reference tenant claim with resolved tenant
+alt invalid token
+  auth --> Client : 401 Unauthorized
+end
+auth --> ctx : TenantUser attached to req
 
-  component [Events Module] as events {
-    card "Outbox" as outbox
-    card "OutboxRelay" as relay
-    card "EventBus" as eventBus
-    card "InMemoryEventBus" as memBus
-  }
+== Rate Limiting ==
 
-  component [Errors] as errors {
-    card "MultiverseError\nhierarchy" as errBase
-  }
-}
+ctx -> rl : rateLimitMiddleware(req, res, next)
+rl -> limiter : consume(tenantId, tier)
+limiter -> limiter : select strategy by tier\n(TokenBucket or SlidingWindow)
+alt rate limited
+  limiter --> Client : 429 Too Many Requests\n+ RateLimit headers
+end
+limiter --> rl : RateLimitResult { allowed, remaining }
+rl --> ctx : next()
 
-' ──────────────────────────────────────
-' Request pipeline (numbered sequence)
-' ──────────────────────────────────────
-client --> httpIn : "1. HTTP Request"
+== Handler Execution ==
 
-http --> tenant : "2. Resolve tenant ID\n   (TenantResolver)"
-tenant --> tenant : "3. Look up tenant\n   (TenantRegistry.get)"
-tenant --> tenantCtx : "4. TenantContext.run()\n   propagate via AsyncLocalStorage"
+ctx -> handler : handler(req, res)
+handler -> query : query(sql, params)
+query -> ctx : TenantContext.current()
+ctx --> query : current tenant
+query -> pool : getConnection()
+pool -> pg : SET search_path TO tenant_X, public
+pool --> query : scoped connection
+query -> pg : execute SQL
+pg --> handler : result
 
-http --> auth : "5. Validate JWT\n   (authMiddleware)"
-auth --> oidc : "verify signature,\nissuer, audience"
-auth --> tenantCtx : "cross-reference\ntenant claim"
+== Background: Outbox Relay ==
 
-http --> ratelimit : "6. Check rate limit\n   (rateLimitMiddleware)"
-ratelimit --> tenantCtx : "read tenant + tier"
-ratelimit --> tenantRL : "consume tokens"
-
-httpOut --> client : "7. Response"
-
-' ──────────────────────────────────────
-' Handler data access
-' ──────────────────────────────────────
-query --> pool : "getConnection()\nSET search_path"
-pool --> pg : "tenant-scoped\nSQL queries"
-query --> tenantCtx : "read current tenant"
-migrator --> pool : "CREATE SCHEMA\nrun migrations"
-outbox --> pg : "INSERT INTO _outbox\n(within transaction)"
-
-' ──────────────────────────────────────
-' Background: Outbox relay
-' ──────────────────────────────────────
-relay --> pool : "poll _outbox tables\nacross all schemas"
-relay --> eventBus : "publish DomainEvent"
-memBus -.-> eventBus : implements
-
-' ──────────────────────────────────────
-' Cross-module dependencies
-' ──────────────────────────────────────
-pgReg --> pg : "public.tenants table"
-authMw ..> registry : "per-tenant OIDC lookup"
-errors <.. http : throws
-errors <.. db : throws
-errors <.. auth : throws
-errors <.. events : throws
-
-' ──────────────────────────────────────
-' Legend
-' ──────────────────────────────────────
-legend right
-  |= Flow |= Description |
-  | 1 | Client sends HTTP request |
-  | 2 | Public path check, then resolve tenant ID |
-  | 3 | Validate tenant exists and is active |
-  | 4 | Wrap remainder in TenantContext.run() |
-  | 5 | JWT verification + tenant cross-reference |
-  | 6 | Per-tenant rate limiting (tier-aware) |
-  | 7 | Handler executes with TenantQuery / Outbox |
-  | BG | OutboxRelay polls _outbox, publishes to EventBus |
-endlegend
+note over pg, handler
+  Within handler transactions:
+  Outbox.publish(client, event) writes to _outbox
+  in the same transaction as business data
+end note
 
 @enduml
