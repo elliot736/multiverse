@@ -1,36 +1,66 @@
-# multiverse
+<p align="center">
+<h1 align="center">multiverse</h1>
+<p align="center">Multi-tenant SaaS framework for TypeScript.<br/>Schema-per-tenant isolation, scoped auth, transactional outbox, rate limiting.</p>
+</p>
 
-> An opinionated TypeScript framework for building multi-tenant SaaS applications, tenant isolation, scoped auth, transactional outbox, and rate limiting out of the box.
+<p align="center">
+  <a href="#why-multiverse">Why multiverse</a> &middot;
+  <a href="#features">Features</a> &middot;
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#usage">Usage</a> &middot;
+  <a href="#api-reference">API Reference</a> &middot;
+  <a href="#design-decisions">Design Decisions</a> &middot;
+  <a href="#architecture">Architecture</a> &middot;
+  <a href="#isolation-model">Isolation Model</a>
+</p>
 
-[![CI](https://github.com/elliot736/multiverse/actions/workflows/ci.yml/badge.svg)](https://github.com/elliot736/multiverse/actions/workflows/ci.yml)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://typescriptlang.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+## Table of Contents
 
-## Why multiverse?
+- [Why multiverse](#why-multiverse)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+  - [Tenant Resolution](#tenant-resolution)
+  - [Database](#database--schema-per-tenant)
+  - [Transactional Outbox](#transactional-outbox)
+  - [Rate Limiting](#rate-limiting)
+  - [Authentication](#authentication)
+  - [Full Example](#full-example--multi-tenant-api)
+- [API Reference](#api-reference)
+  - [Tenant](#tenant)
+  - [Database](#database)
+  - [Auth](#auth)
+  - [Events](#events)
+  - [Rate Limiting](#rate-limiting-1)
+  - [HTTP](#http)
+  - [Errors](#errors)
+- [Design Decisions](#design-decisions)
+- [Architecture](#architecture)
+- [Isolation Model](#isolation-model)
+- [Development](#development)
+- [License](#license)
 
-Building multi-tenant SaaS is hard. Tenant isolation, cross-tenant data leaks, noisy neighbors, auth scoping -- most teams hand-roll these primitives and get them wrong. A missing `WHERE tenant_id = ?` clause silently exposes data. A forgotten rate limit lets one tenant starve the rest. An event published outside a transaction disappears on crash.
+---
 
-multiverse provides production-tested building blocks so you can focus on your product. Schema-per-tenant isolation enforced at the database level, scoped JWT validation, transactional event publishing, and per-tenant rate limiting -- all wired together into a composable middleware stack that works with any Node.js HTTP framework.
+## Why multiverse
+
+Building multi-tenant SaaS is hard. Tenant isolation, cross-tenant data leaks, noisy neighbors, auth scoping. Most teams hand-roll these primitives and get them wrong. A missing `WHERE tenant_id = ?` clause silently exposes data. A forgotten rate limit lets one tenant starve the rest. An event published outside a transaction disappears on crash.
+
+multiverse provides production-tested building blocks so you can focus on your product. Schema-per-tenant isolation enforced at the database level, scoped JWT validation, transactional event publishing, and per-tenant rate limiting, all wired together into a composable middleware stack that works with any Node.js HTTP framework.
+
+---
 
 ## Features
 
-- **Schema-per-tenant isolation** -- each tenant gets a dedicated Postgres schema; cross-tenant queries are rejected at the framework level
-- **Pluggable tenant resolution** -- header, subdomain, path, JWT, or custom resolvers with chain fallback
-- **Scoped authentication** -- JWT validation with tenant claim enforcement, per-tenant OIDC provider support
-- **Transactional outbox** -- reliable event publishing with exactly-once semantics via the outbox pattern
-- **Per-tenant rate limiting** -- token bucket + sliding window with tier-based overrides
-- **Implicit tenant propagation** -- AsyncLocalStorage-based context, no manual parameter passing
-- **Cross-tenant access prevention** -- query builder rejects cross-schema access unless explicitly allowed
+- **Schema-per-tenant isolation.** Each tenant gets a dedicated Postgres schema. Cross-tenant queries are rejected at the framework level.
+- **Pluggable tenant resolution.** Header, subdomain, path, JWT, or custom resolvers with chain fallback.
+- **Scoped authentication.** JWT validation with tenant claim enforcement. Per-tenant OIDC provider support.
+- **Transactional outbox.** Reliable event publishing with exactly-once semantics via the outbox pattern.
+- **Per-tenant rate limiting.** Token bucket + sliding window with tier-based overrides.
+- **Implicit tenant propagation.** AsyncLocalStorage-based context, no manual parameter passing.
+- **Cross-tenant access prevention.** Query builder rejects cross-schema access unless explicitly allowed.
 
-## Architecture
-
-### Class Diagram
-
-![Class Diagram](docs/class-diagram.png)
-
-### Sequence Diagram
-
-![Sequence Diagram](docs/sequence-diagram.png)
+---
 
 ## Quick Start
 
@@ -73,6 +103,8 @@ const server = createServer(async (req, res) => {
 server.listen(3000);
 ```
 
+---
+
 ## Usage
 
 ### Tenant Resolution
@@ -95,7 +127,7 @@ const subdomainResolver = new SubdomainTenantResolver("app.example.com");
 // From URL path: /t/acme/api/orders -> "acme"
 const pathResolver = new PathTenantResolver("/t/");
 
-// From JWT claim (decoded, not verified -- verification happens in auth middleware)
+// From JWT claim (decoded, not verified. Verification happens in auth middleware)
 const jwtResolver = new JwtTenantResolver("tenant_id");
 
 // Chain: try header first, fall back to subdomain
@@ -105,7 +137,9 @@ const chainResolver = new ChainTenantResolver([
 ]);
 ```
 
-### Database -- Schema-Per-Tenant
+---
+
+### Database, Schema-Per-Tenant
 
 ```typescript
 import {
@@ -148,6 +182,8 @@ console.log(
 );
 ```
 
+---
+
 ### Transactional Outbox
 
 ```typescript
@@ -183,6 +219,8 @@ bus.subscribe("order.created", async (event) => {
 await relay.start();
 ```
 
+---
+
 ### Rate Limiting
 
 ```typescript
@@ -209,6 +247,8 @@ const quotaLimiter = new TenantRateLimiter({
 // Rate limiting is automatic when passed to createMultiverseMiddleware
 ```
 
+---
+
 ### Authentication
 
 ```typescript
@@ -229,7 +269,9 @@ const perTenantAuth = authMiddleware(
 );
 ```
 
-### Full Example -- Multi-Tenant API
+---
+
+### Full Example, Multi-Tenant API
 
 ```typescript
 import {
@@ -318,6 +360,8 @@ async function start() {
 start();
 ```
 
+---
+
 ## API Reference
 
 ### Tenant
@@ -357,12 +401,12 @@ start();
 
 | Export                              | Type     | Description                                         |
 | ----------------------------------- | -------- | --------------------------------------------------- |
-| `authMiddleware(config, registry?)` | function | JWT validation middleware with tenant scoping       |
-| `getUser(req)`                      | function | Extract authenticated user from request (or `null`) |
-| `requireUser(req)`                  | function | Extract authenticated user or throw                 |
-| `verifyToken(token, config)`        | function | Verify a JWT and return the payload                 |
-| `decodeToken(token)`                | function | Decode a JWT without verification                   |
-| `clearJwksCache()`                  | function | Clear cached JWKS key sets                          |
+| `authMiddleware(config, registry?)` | function | JWT validation middleware with tenant scoping        |
+| `getUser(req)`                      | function | Extract authenticated user from request (or `null`)  |
+| `requireUser(req)`                  | function | Extract authenticated user or throw                  |
+| `verifyToken(token, config)`        | function | Verify a JWT and return the payload                  |
+| `decodeToken(token)`                | function | Decode a JWT without verification                    |
+| `clearJwksCache()`                  | function | Clear cached JWKS key sets                           |
 
 ### Events
 
@@ -383,8 +427,8 @@ start();
 | ----------------------------- | -------- | ----------------------------------------------- |
 | `TokenBucketLimiter`          | class    | Token bucket algorithm (burst + sustained rate) |
 | `SlidingWindowLimiter`        | class    | Sliding window algorithm (quota enforcement)    |
-| `TenantRateLimiter`           | class    | Per-tenant rate limiting with tier overrides    |
-| `rateLimitMiddleware(config)` | function | HTTP middleware for rate limiting               |
+| `TenantRateLimiter`           | class    | Per-tenant rate limiting with tier overrides     |
+| `rateLimitMiddleware(config)` | function | HTTP middleware for rate limiting                |
 
 ### HTTP
 
@@ -397,7 +441,7 @@ start();
 
 | Export                   | Code                      | Description                                |
 | ------------------------ | ------------------------- | ------------------------------------------ |
-| `MultiverseError`        | --                        | Base error class                           |
+| `MultiverseError`        |                           | Base error class                           |
 | `TenantNotFoundError`    | `TENANT_NOT_FOUND`        | Tenant does not exist in registry          |
 | `CrossTenantAccessError` | `CROSS_TENANT_ACCESS`     | Attempted access to another tenant's data  |
 | `NoTenantContextError`   | `NO_TENANT_CONTEXT`       | Code running outside `TenantContext.run()` |
@@ -407,46 +451,62 @@ start();
 | `TenantResolutionError`  | `TENANT_RESOLUTION_ERROR` | Could not resolve tenant from request      |
 | `MigrationError`         | `MIGRATION_ERROR`         | Schema migration failed                    |
 
+---
+
 ## Design Decisions
 
-- **Schema-per-tenant over row-level isolation** -- Schema boundaries enforce isolation at the database level. A missing `WHERE` clause cannot leak data. [ADR-001](docs/adr/001-schema-per-tenant-isolation.md)
-- **Transactional outbox over direct publishing** -- Events are written in the same transaction as business data. No lost events on crash, no dual-write inconsistency. [ADR-002](docs/adr/002-transactional-outbox.md)
-- **AsyncLocalStorage for implicit propagation** -- Tenant context flows through async call chains without parameter drilling. [ADR-003](docs/adr/003-tenant-resolution.md)
-- **Token bucket + sliding window for rate limiting** -- Token bucket handles burst traffic; sliding window enforces quotas. Both scope by tenant automatically. [ADR-004](docs/adr/004-rate-limiting-strategy.md)
-- **JWT middleware, not full auth server** -- Validates tokens from external OIDC providers. Supports shared and per-tenant IdPs. [ADR-005](docs/adr/005-auth-architecture.md)
+- **Schema-per-tenant over row-level isolation.** Schema boundaries enforce isolation at the database level. A missing `WHERE` clause cannot leak data. [ADR-001](docs/adr/001-schema-per-tenant-isolation.md)
+- **Transactional outbox over direct publishing.** Events are written in the same transaction as business data. No lost events on crash, no dual-write inconsistency. [ADR-002](docs/adr/002-transactional-outbox.md)
+- **AsyncLocalStorage for implicit propagation.** Tenant context flows through async call chains without parameter drilling. [ADR-003](docs/adr/003-tenant-resolution.md)
+- **Token bucket + sliding window for rate limiting.** Token bucket handles burst traffic. Sliding window enforces quotas. Both scope by tenant automatically. [ADR-004](docs/adr/004-rate-limiting-strategy.md)
+- **JWT middleware, not full auth server.** Validates tokens from external OIDC providers. Supports shared and per-tenant IdPs. [ADR-005](docs/adr/005-auth-architecture.md)
 
 See [Architecture Decision Records](docs/adr/) for full context and trade-off analysis.
+
+---
+
+## Architecture
+
+### Class Diagram
+
+![Class Diagram](docs/class-diagram.png)
+
+### Sequence Diagram
+
+![Sequence Diagram](docs/sequence-diagram.png)
+
+---
 
 ## Isolation Model
 
 |                               | Row-Level (`tenant_id` column)        | Schema-Per-Tenant                           | Database-Per-Tenant           |
 | ----------------------------- | ------------------------------------- | ------------------------------------------- | ----------------------------- |
-| **Isolation strength**        | Low -- one missing `WHERE` leaks data | High -- schema boundary enforced by DB      | Highest -- separate databases |
+| **Isolation strength**        | Low. One missing `WHERE` leaks data.  | High. Schema boundary enforced by DB.       | Highest. Separate databases.  |
 | **Migration complexity**      | Single migration for all tenants      | One migration per tenant schema             | One migration per database    |
 | **Connection overhead**       | Single pool                           | Single pool, `SET search_path` per checkout | Pool per database             |
 | **Per-tenant backup/restore** | Difficult (extract rows by ID)        | Simple (`pg_dump -n tenant_xyz`)            | Trivial (dump entire DB)      |
 | **Tenant count ceiling**      | Unlimited                             | ~10,000 (Postgres catalog)                  | Hundreds (operational cost)   |
 | **Cost**                      | Lowest                                | Low                                         | High                          |
 
-multiverse uses **schema-per-tenant** as the default: it provides strong isolation without the operational overhead of per-database isolation, and it eliminates the data-leak risk of row-level filtering.
+multiverse uses **schema-per-tenant** as the default. It provides strong isolation without the operational overhead of per-database isolation, and it eliminates the data-leak risk of row-level filtering.
 
-## Contributing
+---
+
+## Development
 
 ```bash
 git clone https://github.com/elliot736/multiverse.git
 cd multiverse
 npm install
-npm test            # Run tests
+npm test               # Run tests
 npm run test:coverage  # Run tests with coverage
-npm run lint        # Lint
-npm run typecheck   # Type check
-npm run build       # Compile TypeScript
+npm run lint           # Lint
+npm run typecheck      # Type check
+npm run build          # Compile TypeScript
 ```
+
+---
 
 ## License
 
 MIT
-
----
-
-Built by [elliot736](https://ksibati.de) | [GitHub](https://github.com/elliot736)
