@@ -64,6 +64,10 @@ multiverse provides production-tested building blocks so you can focus on your p
 
 ## Quick Start
 
+```bash
+npm install github:elliot736/multiverse
+```
+
 ```typescript
 import {
   createMultiverseMiddleware,
