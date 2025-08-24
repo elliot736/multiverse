@@ -44,21 +44,21 @@
 
 ## Why multiverse
 
-Building multi-tenant SaaS is hard. Tenant isolation, cross-tenant data leaks, noisy neighbors, auth scoping. Most teams hand-roll these primitives and get them wrong. A missing `WHERE tenant_id = ?` clause silently exposes data. A forgotten rate limit lets one tenant starve the rest. An event published outside a transaction disappears on crash.
+A missing `WHERE tenant_id = ?` clause silently exposes one tenant's data to another. A forgotten rate limit lets one tenant starve the rest. An event published outside a transaction disappears on crash. These are not edge cases. They happen in every multi-tenant codebase eventually.
 
-multiverse provides production-tested building blocks so you can focus on your product. Schema-per-tenant isolation enforced at the database level, scoped JWT validation, transactional event publishing, and per-tenant rate limiting, all wired together into a composable middleware stack that works with any Node.js HTTP framework.
+multiverse prevents them at the framework level. Schema-per-tenant isolation means a bad query cannot leak data because it physically runs in the wrong schema. Rate limits are enforced per tenant before your handler runs. Events are written in the same database transaction as business data, so they never go missing. All of it wires together into a composable middleware stack that works with any Node.js HTTP framework.
 
 ---
 
 ## Features
 
-- **Schema-per-tenant isolation.** Each tenant gets a dedicated Postgres schema. Cross-tenant queries are rejected at the framework level.
-- **Pluggable tenant resolution.** Header, subdomain, path, JWT, or custom resolvers with chain fallback.
-- **Scoped authentication.** JWT validation with tenant claim enforcement. Per-tenant OIDC provider support.
-- **Transactional outbox.** Reliable event publishing with exactly-once semantics via the outbox pattern.
-- **Per-tenant rate limiting.** Token bucket + sliding window with tier-based overrides.
-- **Implicit tenant propagation.** AsyncLocalStorage-based context, no manual parameter passing.
-- **Cross-tenant access prevention.** Query builder rejects cross-schema access unless explicitly allowed.
+- **Schema-per-tenant isolation.** Each tenant gets a dedicated Postgres schema. A missing `WHERE` clause cannot leak data because queries are scoped at the connection level.
+- **Pluggable tenant resolution.** Resolve tenants from headers, subdomains, URL paths, JWT claims, or chain multiple strategies with fallback.
+- **Implicit tenant propagation.** AsyncLocalStorage carries the tenant context through the entire async call chain. No manual parameter passing.
+- **Transactional outbox.** Events are written in the same database transaction as business data. No dual-write inconsistency. No lost events on crash.
+- **Per-tenant rate limiting.** Token bucket and sliding window strategies with tier-based overrides. Enterprise tenants get higher limits automatically.
+- **Scoped JWT authentication.** Validates tokens from external OIDC providers. Cross-references the JWT tenant claim against the resolved tenant. Supports per-tenant IdPs for enterprise customers.
+- **Cross-tenant query prevention.** The query builder rejects any attempt to access a different tenant's schema unless explicitly allowed.
 
 ---
 
